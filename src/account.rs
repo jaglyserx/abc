@@ -5,7 +5,7 @@ use sha3::{
 };
 
 #[repr(transparent)]
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct Address([u8; 32]);
 
 impl Address {
@@ -22,6 +22,7 @@ impl Address {
     }
 }
 
+#[derive(Debug)]
 struct Account {
     prv: SecretKey,
     addr: Address,
@@ -36,5 +37,45 @@ impl Account {
             prv: secret_key,
             addr: address,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use secp256k1::PublicKey;
+
+    #[test]
+    fn account_address_matches_secret_key() {
+        let acc = Account::new();
+
+        // Derive the public key from the secret key
+        let secp = secp256k1::Secp256k1::new();
+        let pubkey = PublicKey::from_secret_key(&secp, &acc.prv);
+
+        let expected_addr = Address::from_public_key(&pubkey);
+        assert_eq!(acc.addr, expected_addr);
+    }
+
+    #[test]
+    fn new_accounts_are_distinct() {
+        let a1 = Account::new();
+        let a2 = Account::new();
+
+        assert_ne!(a1.prv, a2.prv);
+        assert_ne!(a1.addr, a2.addr);
+    }
+
+    #[test]
+    fn address_is_stable_for_same_public_key() {
+        let acc = Account::new();
+
+        let secp = secp256k1::Secp256k1::new();
+        let pubkey = PublicKey::from_secret_key(&secp, &acc.prv);
+
+        let addr1 = Address::from_public_key(&pubkey);
+        let addr2 = Address::from_public_key(&pubkey);
+
+        assert_eq!(addr1, addr2);
     }
 }
