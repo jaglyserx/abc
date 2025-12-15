@@ -10,7 +10,7 @@ pub struct Address([u8; 32]);
 
 impl Address {
     pub fn from_public_key(pubkey: &PublicKey) -> Self {
-        let pk_bytes = pubkey.serialize(); // [u8; 33]
+        let pk_bytes = pubkey.serialize();
 
         let mut hasher = Shake256::default();
         hasher.update(&pk_bytes);
@@ -49,7 +49,6 @@ mod tests {
     fn account_address_matches_secret_key() {
         let acc = Account::new();
 
-        // Derive the public key from the secret key
         let secp = secp256k1::Secp256k1::new();
         let pubkey = PublicKey::from_secret_key(&secp, &acc.prv);
 
