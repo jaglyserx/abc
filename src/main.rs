@@ -1,4 +1,4 @@
+mod account;
 mod block;
 
-fn main() {
-}
+fn main() {}
