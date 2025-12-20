@@ -38,6 +38,10 @@ impl Account {
             addr: address,
         }
     }
+
+    fn write(self, dir: &str, pass: &str) {
+        let bytes = self.prv.secret_bytes();
+    }
 }
 
 #[cfg(test)]
