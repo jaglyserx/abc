@@ -66,6 +66,7 @@ impl Account {
 fn encrypt(msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
     let mut salt = [0u8; 32];
     OsRng.try_fill_bytes(&mut salt)?;
+
     let mut key = [0u8; 32];
     Argon2::default().hash_password_into(pass, &salt, &mut key)?;
     let key = key.try_into()?;
