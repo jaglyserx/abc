@@ -1,4 +1,9 @@
-use secp256k1::{PublicKey, SecretKey, generate_keypair, rand};
+use argon2::Argon2;
+use rand::{RngCore, rngs::OsRng};
+use secp256k1::{
+    PublicKey, SecretKey, generate_keypair,
+    rand::{self, TryRngCore, rand_core::OsError},
+};
 use sha3::{
     Shake256,
     digest::{ExtendableOutput, Update, XofReader},
@@ -41,6 +46,16 @@ impl Account {
 
     fn write(self, dir: &str, pass: &str) {
         let bytes = self.prv.secret_bytes();
+    }
+
+    fn encrypt(self, pass: &[u8]) -> anyhow::Result<()> {
+        let bytes = self.prv.secret_bytes();
+        let mut salt = [0u8; 32];
+        OsRng.try_fill_bytes(&mut salt)?;
+        let mut key = [0u8; 32];
+        Argon2::default().hash_password_into(pass, &salt, &mut key)?;
+
+        Ok(())
     }
 }
 
