@@ -1,21 +1,21 @@
 use std::{fs::File, io::Write, path::PathBuf};
 
 use aes_gcm::{
-    AeadCore, Aes256Gcm, KeyInit,
+    AeadCore, Aes256Gcm, KeyInit, Nonce,
     aead::{Aead, OsRng as OsRngAES},
 };
 use argon2::Argon2;
 use rand::rngs::OsRng;
 use secp256k1::{
-    PublicKey, SecretKey,
-    constants::SECRET_KEY_SIZE,
-    generate_keypair,
+    PublicKey, SecretKey, generate_keypair,
     rand::{self, TryRngCore},
 };
 use sha3::{
     Shake256,
     digest::{ExtendableOutput, Update, XofReader},
 };
+
+use crate::constants;
 
 #[repr(transparent)]
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -72,19 +72,29 @@ fn encrypt(msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
 
     let cipher = Aes256Gcm::new(&key);
     let nonce = Aes256Gcm::generate_nonce(&mut OsRngAES);
-    let encrypted = cipher
+    let ciphertext = cipher
         .encrypt(&nonce, msg.as_slice())
         .map_err(|e| anyhow::anyhow!(e))?;
 
-    let mut out = Vec::with_capacity(32 + nonce.len() + salt.len());
-    out.extend_from_slice(&salt);
-    out.extend_from_slice(&nonce);
-    out.extend_from_slice(&encrypted);
-    Ok(out)
+    let mut combined = Vec::with_capacity(32 + nonce.len() + salt.len());
+    combined.extend_from_slice(&salt);
+    combined.extend_from_slice(&nonce);
+    combined.extend_from_slice(&ciphertext);
+    Ok(combined)
 }
 
-fn decrypt() -> anyhow::Result<()> {
-    Ok(())
+fn decrypt(data: &[u8], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let (salt, rest) = data.split_at(constants::SALT_SIZE);
+    let (nonce, ciphertext) = rest.split_at(constants::NONCE_SIZE);
+
+    let mut key = [0u8; 32];
+    Argon2::default().hash_password_into(pass, &salt, &mut key)?;
+    let key = key.try_into()?;
+
+    let cipher = Aes256Gcm::new(&key);
+    cipher
+        .decrypt(Nonce::from_slice(nonce), ciphertext)
+        .map_err(|e| anyhow::anyhow!(e))
 }
 
 #[cfg(test)]
