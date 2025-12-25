@@ -101,6 +101,7 @@ fn decrypt(data: &[u8], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use secp256k1::PublicKey;
 
     #[test]
@@ -134,5 +135,17 @@ mod tests {
         let addr2 = Address::from_public_key(&pubkey);
 
         assert_eq!(addr1, addr2);
+    }
+
+    proptest! {
+        #[test]
+        fn roundtrip_works(
+            msg in any::<[u8; 32]>(),
+            pass in prop::collection::vec(any::<u8>(), 1..64)
+        ) {
+            let encrypted = encrypt(&msg, &pass).expect("encryption failed");
+            let decrypted = decrypt(&encrypted, &pass).expect("decryption failed");
+            prop_assert_eq!(decrypted, msg.to_vec());
+        }
     }
 }
