@@ -1,12 +1,14 @@
+use std::{fs::File, io::Write, path::PathBuf};
+
 use aes_gcm::{
     AeadCore, Aes256Gcm, KeyInit,
     aead::{Aead, OsRng as OsRngAES},
 };
 use argon2::Argon2;
-use rand::{ rngs::OsRng};
+use rand::rngs::OsRng;
 use secp256k1::{
     PublicKey, SecretKey, generate_keypair,
-    rand::{self, TryRngCore}
+    rand::{self, TryRngCore},
 };
 use sha3::{
     Shake256,
@@ -36,6 +38,19 @@ struct Account {
     prv: SecretKey,
     addr: Address,
 }
+fn encrypt(msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut salt = [0u8; 32];
+    OsRng.try_fill_bytes(&mut salt)?;
+    let mut key = [0u8; 32];
+    Argon2::default().hash_password_into(pass, &salt, &mut key)?;
+    let key = key.try_into()?;
+
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRngAES);
+    cipher
+        .encrypt(&nonce, msg.as_slice())
+        .map_err(|e| anyhow::anyhow!(e))
+}
 
 impl Account {
     fn new() -> Account {
@@ -48,22 +63,14 @@ impl Account {
         }
     }
 
-    fn write(self, dir: &str, pass: &str) {
+    fn write(self, dir: &str, pass: &str) -> anyhow::Result<()> {
         let bytes = self.prv.secret_bytes();
-    }
-
-    fn encrypt(self, msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let mut salt = [0u8; 32];
-        OsRng.try_fill_bytes(&mut salt)?;
-        let mut key = [0u8; 32];
-        Argon2::default().hash_password_into(pass, &salt, &mut key)?;
-        let key = key.try_into()?;
-
-        let cipher = Aes256Gcm::new(&key);
-        let nonce = Aes256Gcm::generate_nonce(&mut OsRngAES);
-        cipher
-            .encrypt(&nonce, msg.as_slice())
-            .map_err(|e| anyhow::anyhow!(e))
+        let encrypted = encrypt(&bytes, pass.as_bytes())?;
+        let credentials = str::from_utf8(&self.addr.0)?;
+        let path = PathBuf::from(dir).join(credentials);
+        let mut file = File::create(path)?;
+        file.write_all(&encrypted)?;
+        Ok(())
     }
 }
 
