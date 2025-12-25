@@ -7,7 +7,9 @@ use aes_gcm::{
 use argon2::Argon2;
 use rand::rngs::OsRng;
 use secp256k1::{
-    PublicKey, SecretKey, generate_keypair,
+    PublicKey, SecretKey,
+    constants::SECRET_KEY_SIZE,
+    generate_keypair,
     rand::{self, TryRngCore},
 };
 use sha3::{
@@ -38,19 +40,6 @@ struct Account {
     prv: SecretKey,
     addr: Address,
 }
-fn encrypt(msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
-    let mut salt = [0u8; 32];
-    OsRng.try_fill_bytes(&mut salt)?;
-    let mut key = [0u8; 32];
-    Argon2::default().hash_password_into(pass, &salt, &mut key)?;
-    let key = key.try_into()?;
-
-    let cipher = Aes256Gcm::new(&key);
-    let nonce = Aes256Gcm::generate_nonce(&mut OsRngAES);
-    cipher
-        .encrypt(&nonce, msg.as_slice())
-        .map_err(|e| anyhow::anyhow!(e))
-}
 
 impl Account {
     fn new() -> Account {
@@ -72,6 +61,30 @@ impl Account {
         file.write_all(&encrypted)?;
         Ok(())
     }
+}
+
+fn encrypt(msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
+    let mut salt = [0u8; 32];
+    OsRng.try_fill_bytes(&mut salt)?;
+    let mut key = [0u8; 32];
+    Argon2::default().hash_password_into(pass, &salt, &mut key)?;
+    let key = key.try_into()?;
+
+    let cipher = Aes256Gcm::new(&key);
+    let nonce = Aes256Gcm::generate_nonce(&mut OsRngAES);
+    let encrypted = cipher
+        .encrypt(&nonce, msg.as_slice())
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+    let mut out = Vec::with_capacity(32 + nonce.len() + salt.len());
+    out.extend_from_slice(&salt);
+    out.extend_from_slice(&nonce);
+    out.extend_from_slice(&encrypted);
+    Ok(out)
+}
+
+fn decrypt() -> anyhow::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
