@@ -12,7 +12,9 @@ dependencies = [
  "jsonrpsee",
  "proptest",
  "secp256k1",
+ "serde",
  "sha3",
+ "tempfile",
 ]
 
 [[package]]
