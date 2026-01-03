@@ -1,4 +1,9 @@
-use std::{fs::File, io::Write, path::PathBuf};
+use std::{
+    fmt,
+    fs::{self, File},
+    io::Write,
+    path::PathBuf,
+};
 
 use aes_gcm::{
     AeadCore, Aes256Gcm, KeyInit, Nonce,
@@ -33,16 +38,35 @@ impl Address {
 
         Address(out[..32].try_into().unwrap())
     }
+
+    pub fn to_hex_string(&self) -> String {
+        use fmt::Write as _;
+
+        let mut out = String::with_capacity(self.0.len() * 2);
+        for byte in &self.0 {
+            write!(&mut out, "{:02x}", byte).expect("writing to string");
+        }
+        out
+    }
+}
+
+impl fmt::Display for Address {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for byte in &self.0 {
+            write!(f, "{:02x}", byte)?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
-struct Account {
+pub struct Account {
     prv: SecretKey,
     addr: Address,
 }
 
 impl Account {
-    fn new() -> Account {
+    pub fn new() -> Account {
         let (secret_key, public_key) = generate_keypair(&mut rand::rng());
         let address = Address::from_public_key(&public_key);
 
@@ -52,10 +76,19 @@ impl Account {
         }
     }
 
+    pub fn address(&self) -> Address {
+        self.addr
+    }
+
+    pub fn persist(self, dir: &str, pass: &str) -> anyhow::Result<()> {
+        self.write(dir, pass)
+    }
+
     fn write(self, dir: &str, pass: &str) -> anyhow::Result<()> {
         let bytes = self.prv.secret_bytes();
         let encrypted = encrypt(&bytes, pass.as_bytes())?;
-        let credentials = str::from_utf8(&self.addr.0)?;
+        fs::create_dir_all(dir)?;
+        let credentials = self.addr.to_string();
         let path = PathBuf::from(dir).join(credentials);
         let mut file = File::create(path)?;
         file.write_all(&encrypted)?;
