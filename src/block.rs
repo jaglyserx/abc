@@ -6,8 +6,16 @@
 // These ensure all nodes in the network share the same state, in an efficient manner.
 //
 // Another necessary component will be an Internet Computer Consensus (ICC) protocol,
-// which is essential to have several nodes agree on shared data. 
+// which is essential to have several nodes agree on shared data.
 // Examples of these include: Proof-of-Work (PoW), Proof-of-Authority (PoA), Proof-of-Stake (PoS).
+//
+// The BANYAN SMR protocol must satisfy:
+// 1. Deadlock freeness (every sound must end with a block inclusion)
+// 2. Safety (all honest blocks should finalise the same blocks in a replica)
+// 3. Liveness (if the the current moment is perfectly sequenced, and the leader is honest, then
+//    the suggested block is added to the block tree.)
+// 4. Fast termination (if the network is momentarile synchronous, the leader is honest, and n-p
+//    replicas are honest then the block is added to the tree and finalized in one roundtrip.
 struct BlockProposer {}
 
 impl BlockProposer {
