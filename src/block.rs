@@ -16,6 +16,14 @@
 //    the suggested block is added to the block tree.)
 // 4. Fast termination (if the network is momentarile synchronous, the leader is honest, and n-p
 //    replicas are honest then the block is added to the tree and finalized in one roundtrip.
+//
+// Structure needs a block proposer which handles the BANYAN algorithm. 
+// To represent different types of payloads for different events we'll use a set of messages:
+// 1. Proposal block
+// 2. Vote
+// 3. Quorum certificate
+// 4. Timeout
+// 5. Timeout certificate
 struct BlockProposer {}
 
 impl BlockProposer {
