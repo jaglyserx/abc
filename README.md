@@ -18,7 +18,7 @@ Node's speak to each other by a Gossip Protocol. This means that the nodes at ra
 state replication spreads like wildfire. This way it's very unlikely that nodes would miss data updates.
 
 ## Message types
-1. Proposal - an authenticator node proposes another block for notarization, which means proposing for it to be included in the tree.
+1. Proposal - the leader node proposes another block for notarization, which means proposing for it to be included in the tree.
 2. Notarization vote - vote for block to be notarized, which means it's the best block of the round.
 3. Notarization - when block collects >= n - t votes. (n = committee size (shard), t < n /3) Node message that it is notarized. 
 4. Finalization vote - vote for the block to be finalized and included in tree.
@@ -27,3 +27,11 @@ state replication spreads like wildfire. This way it's very unlikely that nodes 
 The reason notarization and finalization is separated is because of delay in data delivery different nodes could believe different blocks
 were notarized at the same time, if they were instantly committed the tree would fork and diverge. Therefore after notarization the blocks 
 are finalised by all parties.
+
+## Control flow
+Above the control flow for the finalisation of a block in synchronous order is shown. However, there are both semi, och fully asynchronous settings. 
+Sadly, so far there is not theoretical way to make a fully async setting secure for block finalisation, but a semi asynchronous setting can work, and
+is most commonly used.
+
+In the case of async, vs async what it really means is that whether the round fully waits for participants before timing them out if there has been no response.
+As might be obvious from this statement is that in a decentralised network to do this rigoriously is impossible.
