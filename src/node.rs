@@ -3,7 +3,7 @@ use std::net::SocketAddr;
 use jsonrpsee::{RpcModule, server::Server, tokio};
 use serde::Deserialize;
 
-async fn run_server() -> anyhow::Result<SocketAddr> {
+pub async fn run_server() -> anyhow::Result<SocketAddr> {
     let server = Server::builder()
         .build("127.0.0.1".parse::<SocketAddr>()?)
         .await?;
