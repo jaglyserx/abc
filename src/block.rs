@@ -32,4 +32,12 @@ impl BlockProposer {
     }
 }
 
-struct Block {}
+struct BlockData {}
+
+struct Block {
+    block_hash: [u8; 32],
+    parent_hash: [u8; 32],
+    height: u64,
+    finalised_at: u64,
+    data: BlockData,
+}
