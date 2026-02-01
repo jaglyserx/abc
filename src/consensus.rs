@@ -81,6 +81,7 @@ impl ConsensusState {
             return Vec::new();
         }
         self.tree.insert_block(p.block.clone());
+
         let mut out = Vec::new();
         let vote = NotarizationVote {
             round: p.block.header.round,
@@ -342,6 +343,7 @@ impl VotePools {
             .get(&(round, hash))
             .map(|m| m.values().cloned().collect())
             .unwrap_or_else(Vec::new);
+
         NotarizationCertificate {
             round,
             block_hash: hash,
@@ -361,6 +363,7 @@ impl VotePools {
             .get(&(round, hash))
             .map(|m| m.values().cloned().collect())
             .unwrap_or_else(Vec::new);
+
         FinalizationCertificate {
             round,
             block_hash: hash,
@@ -380,6 +383,7 @@ impl VotePools {
             .get(&(round, hash))
             .map(|m| m.values().cloned().collect())
             .unwrap_or_else(Vec::new);
+
         UnlockProof {
             round,
             block_hash: hash,
