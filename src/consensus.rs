@@ -110,9 +110,10 @@ impl ConsensusState {
         .then(|| {
             let cert = self.votes.build_notarization(v.round, v.block_hash);
             self.tree.mark_notarized(cert.block_hash);
-            vec![ConsensusMsg::Notarization(cert)]
+            ConsensusMsg::Notarization(cert)
         })
-        .unwrap_or_default()
+        .into_iter()
+        .collect()
     }
 
     fn on_fast_vote(&mut self, v: FastVote) -> Vec<ConsensusMsg> {
@@ -122,16 +123,20 @@ impl ConsensusState {
             .then(|| {
                 let proof = self.votes.build_unlock_proof(v.round, v.block_hash);
                 self.tree.mark_unlocked(proof.block_hash);
-                vec![ConsensusMsg::UnlockProof(proof)]
+                ConsensusMsg::UnlockProof(proof)
             })
-            .unwrap_or_default()
+            .into_iter()
+            .collect()
     }
 
     fn on_notarization(&mut self, c: NotarizationCertificate) -> Vec<ConsensusMsg> {
         self.tree.mark_notarized(c.block_hash);
 
-        let out = self
-            .votes
+        if self.tree.is_unlocked(c.block_hash) {
+            self.start_round(c.round + 1);
+        }
+
+        self.votes
             .only_block_in_round(c.round, c.block_hash)
             .then_some(ConsensusMsg::FinalizationVote(FinalizationVote {
                 round: c.round,
@@ -140,12 +145,7 @@ impl ConsensusState {
                 signature: Signature::new(),
             }))
             .into_iter()
-            .collect();
-
-        if self.tree.is_unlocked(c.block_hash) {
-            self.start_round(c.round + 1);
-        }
-        out
+            .collect()
     }
 
     fn on_unlock_proof(&mut self, p: UnlockProof) -> Vec<ConsensusMsg> {
@@ -155,13 +155,12 @@ impl ConsensusState {
 
     fn on_finalization_vote(&mut self, v: FinalizationVote) -> Vec<ConsensusMsg> {
         self.votes.insert_finalization(v.clone());
-        if self.votes.count_finalization(v.round, v.block_hash)
-            >= quorum_finalization(self.n, self.f)
-        {
-            let cert = self.votes.build_finalization(v.round, v.block_hash);
-            return vec![ConsensusMsg::Finalization(cert)];
-        }
-        Vec::new()
+        (self.votes.count_finalization(v.round, v.block_hash)
+            >= quorum_finalization(self.n, self.f))
+        .then_some(self.votes.build_finalization(v.round, v.block_hash))
+        .map(ConsensusMsg::Finalization)
+        .into_iter()
+        .collect()
     }
 
     fn on_finalization(&mut self, c: FinalizationCertificate) -> Vec<ConsensusMsg> {
