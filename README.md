@@ -35,3 +35,24 @@ is most commonly used.
 
 In the case of async, vs async what it really means is that whether the round fully waits for participants before timing them out if there has been no response.
 As might be obvious from this statement is that in a decentralised network to do this rigoriously is impossible.
+
+## Banyan fast round vs ICC slow round (message flow)
+```
+Slow ICC-style round (baseline)
+  1) Leader proposes block
+  2) Replicas send notarization votes
+  3) Quorum -> Notarization certificate
+  4) Replicas send finalization votes
+  5) Quorum -> Finalization certificate -> commit chain
+
+Fast Banyan round (good case, rank-0 leader)
+  1) Leader proposes block + parent notarization + unlock proof
+  2) Replicas send fast vote + notarization vote
+  3) Quorum -> notarization + unlock proof
+  4) Fast finalization votes for rank-0 block
+  5) Quorum -> finalization -> commit chain
+
+Notes:
+- Fast path runs concurrently with the slow path; if fast path fails, slow path still progresses.
+- "Unlock proof" is built from fast votes and permits fast finalization.
+```
