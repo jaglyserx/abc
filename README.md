@@ -56,3 +56,13 @@ Notes:
 - Fast path runs concurrently with the slow path; if fast path fails, slow path still progresses.
 - "Unlock proof" is built from fast votes and permits fast finalization.
 ```
+
+## Quorum thresholds (quick reference)
+- Notarization quorum (Banyan): ⌈(n + f + 1) / 2⌉ votes.
+- Finalization quorum: usually `n - f` (i.e., `2f + 1` when `n = 3f + 1`).
+- Fast-path quorum (rank-0 fast finalization): `n - p` fast votes, where `p` is the max fast-path faults.
+
+Definitions:
+- `n` = committee size (replicas in the round).
+- `f` = maximum Byzantine faults (typically `f < n/3`).
+- `p` = maximum faults tolerated specifically by the fast path (see Banyan paper).
