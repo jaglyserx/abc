@@ -4,6 +4,7 @@ use crate::node::run_server;
 
 mod account;
 mod block;
+mod consensus;
 mod constants;
 mod node;
 
