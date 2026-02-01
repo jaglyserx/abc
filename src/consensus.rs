@@ -104,38 +104,44 @@ impl ConsensusState {
 
     fn on_notarization_vote(&mut self, v: NotarizationVote) -> Vec<ConsensusMsg> {
         self.votes.insert_notarization(v.clone());
-        if self.votes.count_notarization(v.round, v.block_hash)
-            >= quorum_notarization(self.n, self.f)
-        {
+
+        (self.votes.count_notarization(v.round, v.block_hash)
+            >= quorum_notarization(self.n, self.f))
+        .then(|| {
             let cert = self.votes.build_notarization(v.round, v.block_hash);
             self.tree.mark_notarized(cert.block_hash);
-            return vec![ConsensusMsg::Notarization(cert)];
-        }
-        Vec::new()
+            vec![ConsensusMsg::Notarization(cert)]
+        })
+        .unwrap_or_default()
     }
 
     fn on_fast_vote(&mut self, v: FastVote) -> Vec<ConsensusMsg> {
         self.votes.insert_fast(v.clone());
-        if self.votes.count_fast(v.round, v.block_hash) >= quorum_fast(self.n, self.p) {
-            let proof = self.votes.build_unlock_proof(v.round, v.block_hash);
-            self.tree.mark_unlocked(proof.block_hash);
-            return vec![ConsensusMsg::UnlockProof(proof)];
-        }
-        Vec::new()
+
+        (self.votes.count_fast(v.round, v.block_hash) >= quorum_fast(self.n, self.p))
+            .then(|| {
+                let proof = self.votes.build_unlock_proof(v.round, v.block_hash);
+                self.tree.mark_unlocked(proof.block_hash);
+                vec![ConsensusMsg::UnlockProof(proof)]
+            })
+            .unwrap_or_default()
     }
 
     fn on_notarization(&mut self, c: NotarizationCertificate) -> Vec<ConsensusMsg> {
         self.tree.mark_notarized(c.block_hash);
-        let mut out = Vec::new();
-        if self.votes.only_block_in_round(c.round, c.block_hash) {
-            let v = FinalizationVote {
+
+        let out = self
+            .votes
+            .only_block_in_round(c.round, c.block_hash)
+            .then_some(ConsensusMsg::FinalizationVote(FinalizationVote {
                 round: c.round,
                 block_hash: c.block_hash,
                 voter: self.id,
                 signature: Signature::new(),
-            };
-            out.push(ConsensusMsg::FinalizationVote(v));
-        }
+            }))
+            .into_iter()
+            .collect();
+
         if self.tree.is_unlocked(c.block_hash) {
             self.start_round(c.round + 1);
         }
