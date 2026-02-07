@@ -115,9 +115,10 @@ impl ConsensusState {
         self.votes.insert_notarization(v.clone());
         let key = (v.round, v.block_hash);
 
-        (self.votes.count_notarization(v.round, v.block_hash) >= quorum_notarization(self.n, self.f)
+        (self.votes.count_notarization(v.round, v.block_hash)
+            >= quorum_notarization(self.n, self.f)
             && self.emitted_notarizations.insert(key))
-            .then(|| {
+        .then(|| {
             let cert = self.votes.build_notarization(v.round, v.block_hash);
             self.tree.mark_notarized(cert.block_hash);
             ConsensusMsg::Notarization(cert)
@@ -132,13 +133,13 @@ impl ConsensusState {
 
         (self.votes.count_fast(v.round, v.block_hash) >= quorum_fast(self.n, self.p)
             && self.emitted_unlocks.insert(key))
-            .then(|| {
-                let proof = self.votes.build_unlock_proof(v.round, v.block_hash);
-                self.tree.mark_unlocked(proof.block_hash);
-                ConsensusMsg::UnlockProof(proof)
-            })
-            .into_iter()
-            .collect()
+        .then(|| {
+            let proof = self.votes.build_unlock_proof(v.round, v.block_hash);
+            self.tree.mark_unlocked(proof.block_hash);
+            ConsensusMsg::UnlockProof(proof)
+        })
+        .into_iter()
+        .collect()
     }
 
     fn on_notarization(&mut self, c: NotarizationCertificate) -> Vec<ConsensusMsg> {

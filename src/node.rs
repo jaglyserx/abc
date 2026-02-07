@@ -1,6 +1,9 @@
 use std::net::SocketAddr;
 
-use jsonrpsee::{RpcModule, server::{Server, ServerHandle}};
+use jsonrpsee::{
+    RpcModule,
+    server::{Server, ServerHandle},
+};
 use serde::Deserialize;
 
 pub async fn run_server() -> anyhow::Result<(SocketAddr, ServerHandle)> {
@@ -53,11 +56,11 @@ mod account_service {
     #[cfg(test)]
     mod tests {
         use super::create_account_in_dir;
+        use crate::node::run_server;
+        use jsonrpsee::tokio;
         use std::fs;
         use std::time::Duration;
         use tempfile::tempdir;
-        use jsonrpsee::tokio;
-        use crate::node::run_server;
 
         #[test]
         fn writes_encrypted_key_to_requested_directory() {
