@@ -762,6 +762,7 @@ fn ordered_signers(votes: &HashMap<NodeId, Signature>) -> (Vec<NodeId>, Vec<Sign
 mod tests {
     use super::*;
     use crate::block::{BlockHeader, BlockPayload};
+    use proptest::prelude::*;
     use std::collections::VecDeque;
 
     fn block(round: u64, proposer: NodeId, parent_hash: BlockHash, payload: &[u8]) -> Block {
@@ -1435,5 +1436,259 @@ mod tests {
             has_round_block,
             "expected at least one accepted non-genesis proposal"
         );
+    }
+
+    #[test]
+    fn conformance_sim_003_large_committee_preserves_safety_and_progress() {
+        #[derive(Clone)]
+        struct Envelope {
+            at: u64,
+            to: NodeId,
+            msg: ConsensusMsg,
+        }
+
+        let n = 7usize;
+        let f = 2usize;
+        let p = 2usize;
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut nodes: HashMap<NodeId, ConsensusState> = (0..n as u64)
+            .map(|id| {
+                let mut state = ConsensusState::new(id, n, f, p, genesis.clone());
+                state.start_round(1);
+                (id, state)
+            })
+            .collect();
+
+        let parent_hash = nodes.get(&0).expect("node").tree.block_hash(&genesis);
+        let proposal_block = block(1, 1, parent_hash, b"large-committee");
+        let proposal_hash = nodes
+            .get(&0)
+            .expect("node")
+            .tree
+            .block_hash(&proposal_block);
+        let proposal = ConsensusMsg::Proposal(ProposalMsg {
+            block: proposal_block,
+            parent_notarization: cert(0, parent_hash, quorum_notarization(n, f)),
+            parent_unlock: unlock(0, parent_hash, quorum_fast(n, p)),
+        });
+
+        let mut queue = VecDeque::new();
+        for to in 0..n as u64 {
+            queue.push_back(Envelope {
+                at: to % 4,
+                to,
+                msg: proposal.clone(),
+            });
+        }
+
+        let mut tick = 0u64;
+        while tick < 100 {
+            let mut ready = Vec::new();
+            let mut rest = VecDeque::new();
+            while let Some(env) = queue.pop_front() {
+                if env.at <= tick {
+                    ready.push(env);
+                } else {
+                    rest.push_back(env);
+                }
+            }
+            queue = rest;
+
+            for env in ready {
+                let outputs = nodes
+                    .get_mut(&env.to)
+                    .expect("node exists")
+                    .handle_msg(env.msg.clone());
+
+                for out in outputs {
+                    for to in 0..n as u64 {
+                        let delay = ((tick + to + env.to) % 5) + 1;
+                        queue.push_back(Envelope {
+                            at: tick + delay,
+                            to,
+                            msg: out.clone(),
+                        });
+                    }
+                }
+
+                // Byzantine node 6 injects malformed votes that must be ignored.
+                if env.to == 6 {
+                    queue.push_back(Envelope {
+                        at: tick + 1,
+                        to: ((tick + 3) % n as u64),
+                        msg: ConsensusMsg::FinalizationVote(FinalizationVote {
+                            round: 1,
+                            block_hash: proposal_hash,
+                            voter: 6,
+                            signature: vec![11; 64],
+                        }),
+                    });
+                }
+            }
+
+            for node in nodes.values_mut() {
+                let _ = node.on_tick();
+            }
+            tick += 1;
+        }
+
+        let mut finalized_hashes_round1 = HashSet::new();
+        for state in nodes.values() {
+            for (hash, node) in &state.tree.nodes {
+                if node.block.header.round == 1 && node.finalized {
+                    finalized_hashes_round1.insert(*hash);
+                }
+            }
+        }
+        assert!(
+            finalized_hashes_round1.len() <= 1,
+            "conflicting finalized hashes observed in round 1 for n=7"
+        );
+
+        let max_round = nodes.values().map(|s| s.round).max().unwrap_or(0);
+        assert!(max_round >= 2, "expected timeout-driven round advancement");
+        assert!(
+            nodes.values().any(|state| state
+                .tree
+                .nodes
+                .values()
+                .any(|n| n.block.header.round == 1)),
+            "expected at least one accepted round-1 block in n=7 simulation"
+        );
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(24))]
+
+        #[test]
+        fn conformance_sim_002_property_randomized_scheduler_preserves_safety_and_progress(
+            schedule in prop::collection::vec(any::<u8>(), 16..192)
+        ) {
+            #[derive(Clone)]
+            struct Envelope {
+                at: u64,
+                to: NodeId,
+                msg: ConsensusMsg,
+            }
+
+            let genesis = block(0, 0, [0; 32], b"genesis");
+            let mut nodes: HashMap<NodeId, ConsensusState> = (0..4u64)
+                .map(|id| {
+                    let mut state = ConsensusState::new(id, 4, 1, 1, genesis.clone());
+                    state.start_round(1);
+                    (id, state)
+                })
+                .collect();
+
+            let parent_hash = nodes.get(&0).expect("node").tree.block_hash(&genesis);
+            let proposal_block = block(1, 1, parent_hash, b"proptest-sim");
+            let proposal_hash = nodes
+                .get(&0)
+                .expect("node")
+                .tree
+                .block_hash(&proposal_block);
+            let proposal = ConsensusMsg::Proposal(ProposalMsg {
+                block: proposal_block,
+                parent_notarization: cert(0, parent_hash, quorum_notarization(4, 1)),
+                parent_unlock: unlock(0, parent_hash, quorum_fast(4, 1)),
+            });
+
+            let mut queue = VecDeque::new();
+            let mut cursor = 0usize;
+            let mut next_byte = || {
+                let b = schedule[cursor % schedule.len()];
+                cursor = cursor.wrapping_add(1);
+                b
+            };
+
+            for to in 0..4u64 {
+                queue.push_back(Envelope {
+                    at: (next_byte() % 3) as u64,
+                    to,
+                    msg: proposal.clone(),
+                });
+            }
+
+            let mut tick = 0u64;
+            while tick < 80 {
+                let mut ready = Vec::new();
+                let mut rest = VecDeque::new();
+                while let Some(env) = queue.pop_front() {
+                    if env.at <= tick {
+                        ready.push(env);
+                    } else {
+                        rest.push_back(env);
+                    }
+                }
+                queue = rest;
+
+                while !ready.is_empty() {
+                    let idx = (next_byte() as usize) % ready.len();
+                    let env = ready.swap_remove(idx);
+
+                    let outputs = nodes
+                        .get_mut(&env.to)
+                        .expect("node exists")
+                        .handle_msg(env.msg.clone());
+
+                    for out in outputs {
+                        for to in 0..4u64 {
+                            let delay = ((next_byte() % 4) + 1) as u64;
+                            queue.push_back(Envelope {
+                                at: tick + delay,
+                                to,
+                                msg: out.clone(),
+                            });
+                        }
+
+                        // Byzantine noise: malformed votes are injected but should be ignored.
+                        if (next_byte() % 5) == 0 {
+                            let bad = ConsensusMsg::NotarizationVote(NotarizationVote {
+                                round: 1,
+                                block_hash: proposal_hash,
+                                voter: 3,
+                                signature: vec![next_byte(); 64],
+                            });
+                            let to = (next_byte() % 4) as u64;
+                            queue.push_back(Envelope {
+                                at: tick + 1,
+                                to,
+                                msg: bad,
+                            });
+                        }
+                    }
+                }
+
+                for node in nodes.values_mut() {
+                    let _ = node.on_tick();
+                }
+                tick += 1;
+            }
+
+            let mut finalized_hashes_round1 = HashSet::new();
+            for state in nodes.values() {
+                for (hash, node) in &state.tree.nodes {
+                    if node.block.header.round == 1 && node.finalized {
+                        finalized_hashes_round1.insert(*hash);
+                    }
+                }
+            }
+            prop_assert!(
+                finalized_hashes_round1.len() <= 1,
+                "conflicting finalized hashes observed in round 1"
+            );
+
+            let has_round1_block = nodes.values().any(|state| {
+                state
+                    .tree
+                    .nodes
+                    .values()
+                    .any(|node| node.block.header.round == 1)
+            });
+            prop_assert!(
+                has_round1_block,
+                "expected at least one round-1 proposal acceptance under reliable delivery"
+            );
+        }
     }
 }

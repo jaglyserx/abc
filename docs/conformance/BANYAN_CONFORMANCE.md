@@ -40,8 +40,10 @@ All conditions must hold:
 1. All rules in `GAP_MATRIX.md` are `implemented`.
 2. Every rule has at least one deterministic test case.
 3. Invariant suite passes in CI on every PR.
-4. No known safety deviations listed as open.
-5. Release notes include conformance evidence and test artifact links.
+4. Conformance CI artifacts are published and retained for audit.
+5. External review checklist is completed (`docs/conformance/EXTERNAL_REVIEW_CHECKLIST.md`).
+6. No known safety deviations listed as open.
+7. Release notes include conformance evidence and test artifact links.
 
 ## Notes
 - This file defines target behavior; implementation details and current status live in `GAP_MATRIX.md`.

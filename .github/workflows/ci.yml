@@ -41,15 +41,26 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare conformance artifact directory
+        run: mkdir -p artifacts/conformance
       - name: Conformance vectors (VAL-003)
-        run: cargo test conformance_val_003
+        run: bash -o pipefail -c "cargo test conformance_val_003 -- --nocapture | tee artifacts/conformance/val-003.log"
       - name: Conformance timeout fallback (RND-002)
-        run: cargo test conformance_rnd_002
+        run: bash -o pipefail -c "cargo test conformance_rnd_002 -- --nocapture | tee artifacts/conformance/rnd-002.log"
       - name: Conformance equivocation guards (VOTE-001/VOTE-002)
-        run: cargo test rejects_equivocating_
+        run: bash -o pipefail -c "cargo test rejects_equivocating_ -- --nocapture | tee artifacts/conformance/vote-001-002.log"
       - name: Conformance certificate validation (VAL-002/FIN-001)
-        run: cargo test rejects_malformed_
+        run: bash -o pipefail -c "cargo test rejects_malformed_ -- --nocapture | tee artifacts/conformance/val-002-fin-001.log"
       - name: Conformance safety simulation (FIN-002/SIM-001)
-        run: cargo test deterministic_simulation_handles_delay_drop_and_byzantine
+        run: bash -o pipefail -c "cargo test deterministic_simulation_handles_delay_drop_and_byzantine -- --nocapture | tee artifacts/conformance/fin-002-sim-001.log"
       - name: Conformance mixed-fault multi-round simulation (SIM-002)
-        run: cargo test conformance_sim_002_multi_round_mixed_faults_preserve_safety_and_progress
+        run: bash -o pipefail -c "cargo test conformance_sim_002_multi_round_mixed_faults_preserve_safety_and_progress -- --nocapture | tee artifacts/conformance/sim-002-multi-round.log"
+      - name: Conformance randomized scheduler property test (SIM-002)
+        run: bash -o pipefail -c "cargo test conformance_sim_002_property_randomized_scheduler_preserves_safety_and_progress -- --nocapture | tee artifacts/conformance/sim-002-property.log"
+      - name: Conformance large-committee simulation (SIM-001)
+        run: bash -o pipefail -c "cargo test conformance_sim_003_large_committee_preserves_safety_and_progress -- --nocapture | tee artifacts/conformance/sim-001-large-committee.log"
+      - name: Upload conformance artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: conformance-evidence
+          path: artifacts/conformance

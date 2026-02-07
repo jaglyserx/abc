@@ -35,11 +35,12 @@ Status legend:
 ## Simulation and CI Gates
 | Rule ID | Requirement | Status | Current Code | Test Evidence | Next Action |
 |---|---|---|---|---|---|
-| SIM-001 | Deterministic delayed/drop/byzantine simulation | implemented | `src/consensus.rs` tests | simulation test passes | Expand scenario matrix coverage |
-| SIM-002 | Property-level invariants for safety/liveness | partial | deterministic single-round + multi-round mixed-fault scenarios | `deterministic_simulation_handles_delay_drop_and_byzantine`, `conformance_sim_002_multi_round_mixed_faults_preserve_safety_and_progress` | Add property/fuzz scheduler for broader invariant coverage |
+| SIM-001 | Deterministic delayed/drop/byzantine simulation | implemented | `src/consensus.rs` tests, including larger validator committee scenario | simulation tests pass (`deterministic_simulation_handles_delay_drop_and_byzantine`, `conformance_sim_003_large_committee_preserves_safety_and_progress`) | Add variant with multi-byzantine behavior under `n=7,f=2` |
+| SIM-002 | Property-level invariants for safety/liveness | implemented | deterministic + multi-round mixed-fault + randomized scheduler property tests | `deterministic_simulation_handles_delay_drop_and_byzantine`, `conformance_sim_002_multi_round_mixed_faults_preserve_safety_and_progress`, `conformance_sim_002_property_randomized_scheduler_preserves_safety_and_progress` | Add seed corpus persistence for regression replay |
 | OPS-001 | CI runs conformance tests explicitly | implemented | `.github/workflows/ci.yml` has dedicated `conformance` job | CI job covers vectors/equivocation/certificate/simulation | Keep rule-to-job mapping maintained |
+| OPS-002 | CI publishes conformance evidence artifacts | implemented | `.github/workflows/ci.yml` uploads `conformance-evidence` artifact | per-rule logs stored under `artifacts/conformance/*.log` | Add artifact retention/versioning policy in release checklist |
 
 ## Immediate Work Queue
-1. Add property/fuzz scheduler for safety/liveness invariant coverage.
-2. Add external protocol review checklist/signoff artifact template.
-3. Add conformance evidence artifact generation in CI.
+1. Add artifact retention/versioning policy to release checklist.
+2. Run independent external protocol review and capture signoff.
+3. Add multi-byzantine `n=7,f=2` simulation scenario.
