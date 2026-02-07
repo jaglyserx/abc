@@ -37,6 +37,10 @@ pub struct ConsensusState {
     pub proposed: bool,
     pub tree: BlockTree,
     pub votes: VotePools,
+    emitted_notarizations: HashSet<(u64, BlockHash)>,
+    emitted_unlocks: HashSet<(u64, BlockHash)>,
+    emitted_finalizations: HashSet<(u64, BlockHash)>,
+    emitted_finalization_votes: HashSet<(u64, BlockHash)>,
 }
 
 impl ConsensusState {
@@ -54,6 +58,10 @@ impl ConsensusState {
             proposed: false,
             tree,
             votes: VotePools::new(),
+            emitted_notarizations: HashSet::new(),
+            emitted_unlocks: HashSet::new(),
+            emitted_finalizations: HashSet::new(),
+            emitted_finalization_votes: HashSet::new(),
         }
     }
 
@@ -105,10 +113,11 @@ impl ConsensusState {
 
     fn on_notarization_vote(&mut self, v: NotarizationVote) -> Vec<ConsensusMsg> {
         self.votes.insert_notarization(v.clone());
+        let key = (v.round, v.block_hash);
 
-        (self.votes.count_notarization(v.round, v.block_hash)
-            >= quorum_notarization(self.n, self.f))
-        .then(|| {
+        (self.votes.count_notarization(v.round, v.block_hash) >= quorum_notarization(self.n, self.f)
+            && self.emitted_notarizations.insert(key))
+            .then(|| {
             let cert = self.votes.build_notarization(v.round, v.block_hash);
             self.tree.mark_notarized(cert.block_hash);
             ConsensusMsg::Notarization(cert)
@@ -119,8 +128,10 @@ impl ConsensusState {
 
     fn on_fast_vote(&mut self, v: FastVote) -> Vec<ConsensusMsg> {
         self.votes.insert_fast(v.clone());
+        let key = (v.round, v.block_hash);
 
-        (self.votes.count_fast(v.round, v.block_hash) >= quorum_fast(self.n, self.p))
+        (self.votes.count_fast(v.round, v.block_hash) >= quorum_fast(self.n, self.p)
+            && self.emitted_unlocks.insert(key))
             .then(|| {
                 let proof = self.votes.build_unlock_proof(v.round, v.block_hash);
                 self.tree.mark_unlocked(proof.block_hash);
@@ -137,8 +148,11 @@ impl ConsensusState {
             self.start_round(c.round + 1);
         }
 
+        let key = (c.round, c.block_hash);
         self.votes
             .only_block_in_round(c.round, c.block_hash)
+            .then_some(self.emitted_finalization_votes.insert(key))
+            .unwrap_or(false)
             .then_some(ConsensusMsg::FinalizationVote(FinalizationVote {
                 round: c.round,
                 block_hash: c.block_hash,
@@ -156,8 +170,10 @@ impl ConsensusState {
 
     fn on_finalization_vote(&mut self, v: FinalizationVote) -> Vec<ConsensusMsg> {
         self.votes.insert_finalization(v.clone());
+        let key = (v.round, v.block_hash);
         (self.votes.count_finalization(v.round, v.block_hash)
-            >= quorum_finalization(self.n, self.f))
+            >= quorum_finalization(self.n, self.f)
+            && self.emitted_finalizations.insert(key))
         .then_some(self.votes.build_finalization(v.round, v.block_hash))
         .map(ConsensusMsg::Finalization)
         .into_iter()
@@ -172,8 +188,44 @@ impl ConsensusState {
         Vec::new()
     }
 
-    fn valid_proposal(&self, _p: &ProposalMsg) -> bool {
-        // TODO: verify round, leader rank, signatures, and parent notarization/unlock proofs.
+    fn valid_proposal(&self, p: &ProposalMsg) -> bool {
+        let block = &p.block;
+        let notarization_quorum = quorum_notarization(self.n, self.f);
+        let fast_quorum = quorum_fast(self.n, self.p);
+
+        if block.header.round != self.round || block.header.round == 0 {
+            return false;
+        }
+
+        if !self.tree.nodes.contains_key(&block.header.parent_hash) {
+            return false;
+        }
+
+        if p.parent_notarization.block_hash != block.header.parent_hash {
+            return false;
+        }
+
+        if p.parent_notarization.round + 1 != block.header.round {
+            return false;
+        }
+
+        if p.parent_notarization.voters.len() != p.parent_notarization.signatures.len()
+            || p.parent_unlock.voters.len() != p.parent_unlock.signatures.len()
+        {
+            return false;
+        }
+
+        if p.parent_notarization.voters.len() < notarization_quorum {
+            return false;
+        }
+
+        if p.parent_unlock.round != p.parent_notarization.round
+            || p.parent_unlock.block_hash != p.parent_notarization.block_hash
+            || p.parent_unlock.voters.len() < fast_quorum
+        {
+            return false;
+        }
+
         true
     }
 }
@@ -410,4 +462,109 @@ pub fn quorum_finalization(n: usize, f: usize) -> usize {
 
 pub fn quorum_fast(n: usize, p: usize) -> usize {
     n.saturating_sub(p)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::block::{BlockHeader, BlockPayload};
+
+    fn block(round: u64, proposer: NodeId, parent_hash: BlockHash, payload: &[u8]) -> Block {
+        Block {
+            header: BlockHeader {
+                round,
+                proposer,
+                parent_hash,
+                payload_hash: [0u8; 32],
+                rank: 0,
+            },
+            payload: BlockPayload {
+                bytes: payload.to_vec(),
+            },
+            signature: vec![],
+        }
+    }
+
+    fn cert(round: u64, hash: BlockHash, voters: usize) -> NotarizationCertificate {
+        NotarizationCertificate {
+            round,
+            block_hash: hash,
+            voters: (0..voters as u64).collect(),
+            signatures: vec![vec![]; voters],
+        }
+    }
+
+    fn unlock(round: u64, hash: BlockHash, voters: usize) -> UnlockProof {
+        UnlockProof {
+            round,
+            block_hash: hash,
+            voters: (0..voters as u64).collect(),
+            signatures: vec![vec![]; voters],
+        }
+    }
+
+    #[test]
+    fn valid_proposal_emits_votes() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis.clone());
+        state.start_round(1);
+
+        let parent_hash = state.tree.block_hash(&genesis);
+        let proposal_block = block(1, 2, parent_hash, b"proposal");
+        let proposal = ProposalMsg {
+            block: proposal_block,
+            parent_notarization: cert(0, parent_hash, quorum_notarization(4, 1)),
+            parent_unlock: unlock(0, parent_hash, quorum_fast(4, 1)),
+        };
+
+        let out = state.handle_msg(ConsensusMsg::Proposal(proposal));
+        assert_eq!(out.len(), 2);
+    }
+
+    #[test]
+    fn invalid_proposal_parent_hash_is_rejected() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis.clone());
+        state.start_round(1);
+
+        let parent_hash = state.tree.block_hash(&genesis);
+        let bad_parent = [9u8; 32];
+        let proposal = ProposalMsg {
+            block: block(1, 2, bad_parent, b"proposal"),
+            parent_notarization: cert(0, parent_hash, quorum_notarization(4, 1)),
+            parent_unlock: unlock(0, parent_hash, quorum_fast(4, 1)),
+        };
+
+        let out = state.handle_msg(ConsensusMsg::Proposal(proposal));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn notarization_emits_certificate_once() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis);
+        let hash = [7u8; 32];
+
+        for voter in 1..=3 {
+            let out = state.handle_msg(ConsensusMsg::NotarizationVote(NotarizationVote {
+                round: 1,
+                block_hash: hash,
+                voter,
+                signature: vec![],
+            }));
+            if voter < 3 {
+                assert!(out.is_empty());
+            } else {
+                assert_eq!(out.len(), 1);
+            }
+        }
+
+        let extra = state.handle_msg(ConsensusMsg::NotarizationVote(NotarizationVote {
+            round: 1,
+            block_hash: hash,
+            voter: 4,
+            signature: vec![],
+        }));
+        assert!(extra.is_empty());
+    }
 }

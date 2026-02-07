@@ -1,11 +1,11 @@
 use std::net::SocketAddr;
 
-use jsonrpsee::{RpcModule, server::Server, tokio};
+use jsonrpsee::{RpcModule, server::{Server, ServerHandle}};
 use serde::Deserialize;
 
-pub async fn run_server() -> anyhow::Result<SocketAddr> {
+pub async fn run_server() -> anyhow::Result<(SocketAddr, ServerHandle)> {
     let server = Server::builder()
-        .build("127.0.0.1".parse::<SocketAddr>()?)
+        .build("127.0.0.1:0".parse::<SocketAddr>()?)
         .await?;
     let mut module = RpcModule::new(());
     module.register_method("say_hello", |_, _, _| "hello")?;
@@ -16,8 +16,7 @@ pub async fn run_server() -> anyhow::Result<SocketAddr> {
 
     let addr = server.local_addr()?;
     let handle = server.start(module);
-    tokio::spawn(handle.stopped());
-    Ok(addr)
+    Ok((addr, handle))
 }
 
 #[derive(Deserialize)]
@@ -53,9 +52,12 @@ mod account_service {
 
     #[cfg(test)]
     mod tests {
-        use super::*;
+        use super::create_account_in_dir;
         use std::fs;
+        use std::time::Duration;
         use tempfile::tempdir;
+        use jsonrpsee::tokio;
+        use crate::node::run_server;
 
         #[test]
         fn writes_encrypted_key_to_requested_directory() {
@@ -70,6 +72,28 @@ mod account_service {
 
             let contents = fs::read(keyfile).expect("read keyfile");
             assert!(!contents.is_empty(), "key file should not be empty");
+        }
+
+        #[tokio::test]
+        async fn server_starts_with_ephemeral_port() {
+            let (addr, handle) = match run_server().await {
+                Ok(server) => server,
+                Err(err)
+                    if err
+                        .chain()
+                        .any(|cause| cause.to_string().contains("Operation not permitted")) =>
+                {
+                    return;
+                }
+                Err(err) => panic!("server starts: {err}"),
+            };
+
+            assert!(addr.port() > 0, "server should bind an ephemeral port");
+
+            handle.stop().expect("stop server");
+            tokio::time::timeout(Duration::from_secs(2), handle.stopped())
+                .await
+                .expect("server should stop");
         }
     }
 }

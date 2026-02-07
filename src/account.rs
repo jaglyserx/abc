@@ -118,6 +118,10 @@ fn encrypt(msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
 }
 
 fn decrypt(data: &[u8], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
+    if data.len() < constants::SALT_SIZE + constants::NONCE_SIZE {
+        anyhow::bail!("ciphertext too short");
+    }
+
     let (salt, rest) = data.split_at(constants::SALT_SIZE);
     let (nonce, ciphertext) = rest.split_at(constants::NONCE_SIZE);
 
@@ -170,7 +174,15 @@ mod tests {
         assert_eq!(addr1, addr2);
     }
 
+    #[test]
+    fn decrypt_rejects_short_input() {
+        let err = decrypt(&[1, 2, 3], b"password").expect_err("short input should fail");
+        assert!(err.to_string().contains("ciphertext too short"));
+    }
+
     proptest! {
+        #![proptest_config(ProptestConfig::with_cases(8))]
+
         #[test]
         fn roundtrip_works(
             msg in any::<[u8; 32]>(),

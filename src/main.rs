@@ -10,6 +10,7 @@ mod node;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    run_server().await?;
+    let (_addr, handle) = run_server().await?;
+    handle.stopped().await;
     Ok(())
 }
