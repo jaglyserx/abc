@@ -16,7 +16,7 @@ Status legend:
 | Rule ID | Requirement | Status | Current Code | Test Evidence | Next Action |
 |---|---|---|---|---|---|
 | RND-001 | Rank-0 proposer must be round leader | implemented | `src/consensus.rs` (`valid_proposal`) | `non_leader_rank_zero_proposal_is_rejected` | Add positive test for leader rank-0 under timeout-free path |
-| RND-002 | Non-leader proposals require timeout path | partial | `src/consensus.rs` (`valid_proposal`, `round_timed_out`) | timeout advancement test exists | Add end-to-end timeout fallback proposal test |
+| RND-002 | Non-leader proposals require timeout path | implemented | `src/consensus.rs` (`valid_proposal`, `round_timed_out`) | `conformance_rnd_002_timeout_fallback_accepts_ranked_non_leader_proposal` | Add multi-round fallback scenarios |
 | RND-003 | Round transition after timeout | implemented | `src/consensus.rs` (`on_tick`) | `timeout_advances_round` | Add multi-round liveness simulation assertion |
 
 ## Voting and Equivocation Rules
@@ -40,6 +40,6 @@ Status legend:
 | OPS-001 | CI runs conformance tests explicitly | implemented | `.github/workflows/ci.yml` has dedicated `conformance` job | CI job covers vectors/equivocation/certificate/simulation | Keep rule-to-job mapping maintained |
 
 ## Immediate Work Queue
-1. Add timeout fallback positive-path test for non-leader ranked proposals.
-2. Add broader multi-round and mixed-fault conformance scenarios.
-3. Add external protocol review checklist/signoff artifact template.
+1. Add broader multi-round and mixed-fault conformance scenarios.
+2. Add external protocol review checklist/signoff artifact template.
+3. Add conformance evidence artifact generation in CI.

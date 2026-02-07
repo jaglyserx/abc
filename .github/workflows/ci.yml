@@ -43,6 +43,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Conformance vectors (VAL-003)
         run: cargo test conformance_val_003
+      - name: Conformance timeout fallback (RND-002)
+        run: cargo test conformance_rnd_002
       - name: Conformance equivocation guards (VOTE-001/VOTE-002)
         run: cargo test rejects_equivocating_
       - name: Conformance certificate validation (VAL-002/FIN-001)

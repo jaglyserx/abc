@@ -1251,4 +1251,42 @@ mod tests {
             "{\"round\":1,\"block_hash\":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],\"voters\":[0,1,2],\"signatures\":[[63,255,116,37,97,219,170,93,180,212,9,156,90,163,105,243,49,86,133,65,188,7,90,14,142,133,106,214,160,146,144,224,94,122,73,168,70,217,61,165,17,85,50,83,165,54,116,93,223,136,136,98,219,108,33,236,132,139,83,153,113,239,27,77],[156,229,66,99,189,236,248,121,0,219,136,165,166,14,161,47,5,69,15,180,44,169,63,68,74,205,225,227,175,30,76,72,54,140,16,196,68,30,151,198,186,102,223,220,214,148,126,93,212,147,101,132,182,185,228,109,96,180,208,55,242,250,84,183],[26,237,183,14,216,147,249,2,86,166,20,98,204,136,105,180,181,225,173,4,255,170,112,230,91,120,57,205,126,146,226,235,0,116,156,251,110,205,120,199,249,249,66,200,52,44,237,67,95,180,100,66,26,185,163,172,190,122,36,21,220,35,70,252]]}"
         );
     }
+
+    #[test]
+    fn conformance_rnd_002_timeout_fallback_accepts_ranked_non_leader_proposal() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis.clone());
+        state.start_round(1);
+
+        let parent_hash = state.tree.block_hash(&genesis);
+        // Round 1 leader for n=4 is node 1, so proposer 2 is a non-leader.
+        let proposal = ProposalMsg {
+            block: Block {
+                header: BlockHeader {
+                    round: 1,
+                    proposer: 2,
+                    parent_hash,
+                    payload_hash: [0u8; 32],
+                    rank: 1,
+                },
+                payload: BlockPayload {
+                    bytes: b"fallback".to_vec(),
+                },
+                signature: vec![],
+            },
+            parent_notarization: cert(0, parent_hash, quorum_notarization(4, 1)),
+            parent_unlock: unlock(0, parent_hash, quorum_fast(4, 1)),
+        };
+
+        let before_timeout = state.handle_msg(ConsensusMsg::Proposal(proposal.clone()));
+        assert!(
+            before_timeout.is_empty(),
+            "non-leader ranked proposal must be rejected before timeout"
+        );
+
+        // Simulate timeout elapsed for current round without advancing to next round.
+        state.current_tick = state.round_started_at_tick + state.round_timeout_ticks;
+        let after_timeout = state.handle_msg(ConsensusMsg::Proposal(proposal));
+        assert_eq!(after_timeout.len(), 2);
+    }
 }
