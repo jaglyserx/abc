@@ -8,40 +8,69 @@ use jsonrpsee::{
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
 
-use crate::ledger::{Ledger, SubmitTxRequest, TxReceipt};
+use crate::{
+    ledger::{ExecutedBlock, Ledger, LedgerSnapshot, SubmitTxRequest, TxReceipt},
+    state_db::StateDb,
+};
 
 pub async fn run_server() -> anyhow::Result<(SocketAddr, ServerHandle)> {
     let server = Server::builder()
         .build("127.0.0.1:0".parse::<SocketAddr>()?)
         .await?;
 
-    let ledger = Arc::new(Mutex::new(Ledger::new()));
-    let mut module = RpcModule::new(Arc::clone(&ledger));
+    let state_db = Arc::new(StateDb::open(state_db_root())?);
+    let config = Arc::new(AppConfig::from_env());
+    let ledger = match state_db.load_snapshot()? {
+        Some(snapshot) => Ledger::from_snapshot(snapshot),
+        None => Ledger::new(),
+    };
+
+    let app_state = Arc::new(Mutex::new(AppState {
+        ledger,
+        state_db: Arc::clone(&state_db),
+        config,
+        metrics: RpcMetrics::new(),
+    }));
+
+    let mut module = RpcModule::new(Arc::clone(&app_state));
 
     module.register_method("say_hello", |_, _, _| "hello")?;
 
-    module.register_async_method("create_account", |params, ledger, _| async move {
+    module.register_async_method("create_account", |params, state, _| async move {
         let req = params.parse::<CreateAccountReq>()?;
+        if req.pass.len() < state.lock().await.config.min_account_pass_len {
+            return Err(invalid_params("passphrase too short"));
+        }
         let addr = account_service::create_account(&req.pass)?;
 
-        let mut ledger = ledger.lock().await;
-        ledger.ensure_account(&addr);
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        state.ledger.ensure_account(&addr);
         if let Some(amount) = req.initial_balance {
-            ledger.credit_account(&addr, amount);
+            state.ledger.credit_account(&addr, amount);
         }
+        state.persist_snapshot().map_err(internal_error)?;
 
         Ok::<CreateAccountResp, ErrorObjectOwned>(CreateAccountResp { address: addr })
     })?;
 
-    module.register_async_method("faucet", |params, ledger, _| async move {
+    module.register_async_method("faucet", |params, state, _| async move {
         let req = params.parse::<FaucetReq>()?;
         if req.amount == 0 {
             return Err(invalid_params("amount must be greater than zero"));
         }
 
-        let mut ledger = ledger.lock().await;
-        ledger.credit_account(&req.address, req.amount);
-        let balance = ledger.get_balance(&req.address);
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        if !state.config.enable_faucet {
+            return Err(invalid_params("faucet is disabled"));
+        }
+        if req.amount > state.config.max_faucet_amount {
+            return Err(invalid_params("requested amount exceeds faucet limit"));
+        }
+        state.ledger.credit_account(&req.address, req.amount);
+        let balance = state.ledger.get_balance(&req.address);
+        state.persist_snapshot().map_err(internal_error)?;
 
         Ok::<FaucetResp, ErrorObjectOwned>(FaucetResp {
             address: req.address,
@@ -49,11 +78,13 @@ pub async fn run_server() -> anyhow::Result<(SocketAddr, ServerHandle)> {
         })
     })?;
 
-    module.register_async_method("submit_tx", |params, ledger, _| async move {
+    module.register_async_method("submit_tx", |params, state, _| async move {
         let req = params.parse::<SubmitTxReq>()?;
 
-        let mut ledger = ledger.lock().await;
-        let submission = ledger
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        let submission = state
+            .ledger
             .submit_tx(SubmitTxRequest {
                 from: req.from,
                 to: req.to,
@@ -61,6 +92,8 @@ pub async fn run_server() -> anyhow::Result<(SocketAddr, ServerHandle)> {
                 nonce: req.nonce,
             })
             .map_err(|err| invalid_params(&err.to_string()))?;
+        state.metrics.txs_submitted = state.metrics.txs_submitted.saturating_add(1);
+        state.persist_snapshot().map_err(internal_error)?;
 
         Ok::<SubmitTxResp, ErrorObjectOwned>(SubmitTxResp {
             tx_id: submission.tx_id,
@@ -68,54 +101,220 @@ pub async fn run_server() -> anyhow::Result<(SocketAddr, ServerHandle)> {
         })
     })?;
 
-    module.register_async_method("produce_block", |params, ledger, _| async move {
+    module.register_async_method("produce_block", |params, state, _| async move {
         let req = params.parse::<ProduceBlockReq>()?;
 
-        let mut ledger = ledger.lock().await;
-        let result = ledger.execute_block(req.max_txs.unwrap_or(100));
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        let result = state.ledger.execute_block(req.max_txs.unwrap_or(100));
+        let executed = state.ledger.blocks().last().cloned().ok_or_else(|| {
+            internal_error(anyhow::anyhow!("missing executed block after execution"))
+        })?;
+
+        state
+            .state_db
+            .append_block(&executed)
+            .map_err(internal_error)?;
+        state.metrics.blocks_produced = state.metrics.blocks_produced.saturating_add(1);
+        state.persist_snapshot().map_err(internal_error)?;
 
         Ok::<ProduceBlockResp, ErrorObjectOwned>(ProduceBlockResp {
             height: result.height,
             included: result.included,
             committed: result.committed,
             rejected: result.rejected,
+            tx_ids: result.tx_ids,
         })
     })?;
 
-    module.register_async_method("get_balance", |params, ledger, _| async move {
+    module.register_async_method("get_balance", |params, state, _| async move {
         let req = params.parse::<BalanceReq>()?;
-        let ledger = ledger.lock().await;
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
         Ok::<BalanceResp, ErrorObjectOwned>(BalanceResp {
             address: req.address.clone(),
-            balance: ledger.get_balance(&req.address),
+            balance: state.ledger.get_balance(&req.address),
         })
     })?;
 
-    module.register_async_method("get_nonce", |params, ledger, _| async move {
+    module.register_async_method("get_nonce", |params, state, _| async move {
         let req = params.parse::<NonceReq>()?;
-        let ledger = ledger.lock().await;
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
         Ok::<NonceResp, ErrorObjectOwned>(NonceResp {
             address: req.address.clone(),
-            nonce: ledger.get_nonce(&req.address),
+            nonce: state.ledger.get_nonce(&req.address),
         })
     })?;
 
-    module.register_async_method("get_receipt", |params, ledger, _| async move {
+    module.register_async_method("get_receipt", |params, state, _| async move {
         let req = params.parse::<ReceiptReq>()?;
-        let ledger = ledger.lock().await;
-        Ok::<Option<TxReceipt>, ErrorObjectOwned>(ledger.get_receipt(&req.tx_id))
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        Ok::<Option<TxReceipt>, ErrorObjectOwned>(state.ledger.get_receipt(&req.tx_id))
     })?;
 
-    module.register_async_method("mempool_size", |_, ledger, _| async move {
-        let ledger = ledger.lock().await;
+    module.register_async_method("mempool_size", |_, state, _| async move {
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
         Ok::<MempoolResp, ErrorObjectOwned>(MempoolResp {
-            mempool_size: ledger.mempool_size(),
+            mempool_size: state.ledger.mempool_size(),
+        })
+    })?;
+
+    module.register_async_method("export_snapshot", |_, state, _| async move {
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        state.metrics.snapshots_exported = state.metrics.snapshots_exported.saturating_add(1);
+        Ok::<LedgerSnapshot, ErrorObjectOwned>(state.ledger.snapshot())
+    })?;
+
+    module.register_async_method("export_blocks", |_, state, _| async move {
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        Ok::<Vec<ExecutedBlock>, ErrorObjectOwned>(state.ledger.blocks().to_vec())
+    })?;
+
+    module.register_async_method("import_snapshot", |params, state, _| async move {
+        let req = params.parse::<ImportSnapshotReq>()?;
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+
+        let current_height = state.ledger.snapshot().next_height;
+        if req.snapshot.next_height < current_height {
+            return Err(invalid_params(
+                "incoming snapshot height is older than local state",
+            ));
+        }
+
+        state.ledger = Ledger::from_snapshot(req.snapshot.clone());
+        state
+            .state_db
+            .save_snapshot(&req.snapshot)
+            .map_err(internal_error)?;
+
+        if let Some(blocks) = req.blocks {
+            state
+                .state_db
+                .reset_blocks(&blocks)
+                .map_err(internal_error)?;
+        } else {
+            let blocks = state.ledger.blocks().to_vec();
+            state
+                .state_db
+                .reset_blocks(&blocks)
+                .map_err(internal_error)?;
+        }
+        state.metrics.snapshots_imported = state.metrics.snapshots_imported.saturating_add(1);
+
+        Ok::<ImportSnapshotResp, ErrorObjectOwned>(ImportSnapshotResp {
+            imported_height: state.ledger.snapshot().next_height,
+        })
+    })?;
+
+    module.register_async_method("health", |_, state, _| async move {
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        let uptime_seconds = std::time::SystemTime::now()
+            .duration_since(state.metrics.started_at)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        Ok::<HealthResp, ErrorObjectOwned>(HealthResp {
+            status: "ok".to_string(),
+            uptime_seconds,
+            current_height: state.ledger.current_height(),
+            mempool_size: state.ledger.mempool_size(),
+        })
+    })?;
+
+    module.register_async_method("metrics", |_, state, _| async move {
+        let mut state = state.lock().await;
+        state.metrics.rpc_calls = state.metrics.rpc_calls.saturating_add(1);
+        Ok::<MetricsResp, ErrorObjectOwned>(MetricsResp {
+            rpc_calls: state.metrics.rpc_calls,
+            txs_submitted: state.metrics.txs_submitted,
+            blocks_produced: state.metrics.blocks_produced,
+            snapshots_imported: state.metrics.snapshots_imported,
+            snapshots_exported: state.metrics.snapshots_exported,
+            current_height: state.ledger.current_height(),
+            mempool_size: state.ledger.mempool_size(),
         })
     })?;
 
     let addr = server.local_addr()?;
     let handle = server.start(module);
     Ok((addr, handle))
+}
+
+struct AppState {
+    ledger: Ledger,
+    state_db: Arc<StateDb>,
+    config: Arc<AppConfig>,
+    metrics: RpcMetrics,
+}
+
+impl AppState {
+    fn persist_snapshot(&self) -> anyhow::Result<()> {
+        self.state_db.save_snapshot(&self.ledger.snapshot())
+    }
+}
+
+fn state_db_root() -> String {
+    let data_dir = std::env::var("ABC_DATA_DIR").unwrap_or_else(|_| "data".to_string());
+    let node_id = std::env::var("ABC_NODE_ID").unwrap_or_else(|_| "1".to_string());
+    format!("{}/node-{}/state", data_dir, node_id)
+}
+
+struct AppConfig {
+    min_account_pass_len: usize,
+    enable_faucet: bool,
+    max_faucet_amount: u64,
+}
+
+impl AppConfig {
+    fn from_env() -> Self {
+        let min_account_pass_len = std::env::var("ABC_MIN_ACCOUNT_PASS_LEN")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(10);
+        let enable_faucet = std::env::var("ABC_ENABLE_FAUCET")
+            .ok()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(true);
+        let max_faucet_amount = std::env::var("ABC_MAX_FAUCET_AMOUNT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(1_000_000);
+
+        Self {
+            min_account_pass_len,
+            enable_faucet,
+            max_faucet_amount,
+        }
+    }
+}
+
+struct RpcMetrics {
+    started_at: std::time::SystemTime,
+    rpc_calls: u64,
+    txs_submitted: u64,
+    blocks_produced: u64,
+    snapshots_imported: u64,
+    snapshots_exported: u64,
+}
+
+impl RpcMetrics {
+    fn new() -> Self {
+        Self {
+            started_at: std::time::SystemTime::now(),
+            rpc_calls: 0,
+            txs_submitted: 0,
+            blocks_produced: 0,
+            snapshots_imported: 0,
+            snapshots_exported: 0,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -166,6 +365,7 @@ struct ProduceBlockResp {
     included: usize,
     committed: usize,
     rejected: usize,
+    tx_ids: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -200,12 +400,46 @@ struct MempoolResp {
     mempool_size: usize,
 }
 
+#[derive(Deserialize)]
+struct ImportSnapshotReq {
+    snapshot: LedgerSnapshot,
+    blocks: Option<Vec<ExecutedBlock>>,
+}
+
+#[derive(Clone, Serialize)]
+struct ImportSnapshotResp {
+    imported_height: u64,
+}
+
+#[derive(Clone, Serialize)]
+struct HealthResp {
+    status: String,
+    uptime_seconds: u64,
+    current_height: u64,
+    mempool_size: usize,
+}
+
+#[derive(Clone, Serialize)]
+struct MetricsResp {
+    rpc_calls: u64,
+    txs_submitted: u64,
+    blocks_produced: u64,
+    snapshots_imported: u64,
+    snapshots_exported: u64,
+    current_height: u64,
+    mempool_size: usize,
+}
+
 fn invalid_params(message: &str) -> ErrorObjectOwned {
     ErrorObjectOwned::owned(
         ErrorCode::InvalidParams.code(),
         message.to_string(),
         None::<()>,
     )
+}
+
+fn internal_error(err: anyhow::Error) -> ErrorObjectOwned {
+    ErrorObjectOwned::owned(ErrorCode::InternalError.code(), err.to_string(), None::<()>)
 }
 
 mod account_service {

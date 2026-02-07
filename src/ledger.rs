@@ -48,12 +48,31 @@ pub struct BlockExecutionResult {
     pub included: usize,
     pub committed: usize,
     pub rejected: usize,
+    pub tx_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TxSubmission {
     pub tx_id: String,
     pub mempool_size: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ExecutedBlock {
+    pub height: u64,
+    pub tx_ids: Vec<String>,
+    pub committed: usize,
+    pub rejected: usize,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LedgerSnapshot {
+    pub next_height: u64,
+    pub state: HashMap<AccountId, AccountState>,
+    pub mempool: Vec<Transaction>,
+    pub receipts: HashMap<String, TxReceipt>,
+    pub seen_tx_ids: Vec<String>,
+    pub blocks: Vec<ExecutedBlock>,
 }
 
 #[derive(Debug, Default)]
@@ -63,6 +82,7 @@ pub struct Ledger {
     mempool: VecDeque<Transaction>,
     receipts: HashMap<String, TxReceipt>,
     seen_tx_ids: HashMap<String, bool>,
+    blocks: Vec<ExecutedBlock>,
 }
 
 impl Ledger {
@@ -130,12 +150,14 @@ impl Ledger {
         let mut included = 0usize;
         let mut committed = 0usize;
         let mut rejected = 0usize;
+        let mut tx_ids = Vec::new();
 
         while included < max_txs {
             let Some(tx) = self.mempool.pop_front() else {
                 break;
             };
             included += 1;
+            tx_ids.push(tx.id.clone());
 
             let result = self.apply_tx(&tx);
             if result.error.is_none() {
@@ -159,11 +181,19 @@ impl Ledger {
             );
         }
 
+        self.blocks.push(ExecutedBlock {
+            height,
+            tx_ids: tx_ids.clone(),
+            committed,
+            rejected,
+        });
+
         BlockExecutionResult {
             height,
             included,
             committed,
             rejected,
+            tx_ids,
         }
     }
 
@@ -181,6 +211,41 @@ impl Ledger {
 
     pub fn mempool_size(&self) -> usize {
         self.mempool.len()
+    }
+
+    pub fn current_height(&self) -> u64 {
+        self.next_height.saturating_sub(1)
+    }
+
+    pub fn blocks(&self) -> &[ExecutedBlock] {
+        &self.blocks
+    }
+
+    pub fn snapshot(&self) -> LedgerSnapshot {
+        LedgerSnapshot {
+            next_height: self.next_height,
+            state: self.state.clone(),
+            mempool: self.mempool.iter().cloned().collect(),
+            receipts: self.receipts.clone(),
+            seen_tx_ids: self.seen_tx_ids.keys().cloned().collect(),
+            blocks: self.blocks.clone(),
+        }
+    }
+
+    pub fn from_snapshot(snapshot: LedgerSnapshot) -> Self {
+        let mut seen_tx_ids = HashMap::new();
+        for id in snapshot.seen_tx_ids {
+            seen_tx_ids.insert(id, true);
+        }
+
+        Self {
+            next_height: snapshot.next_height,
+            state: snapshot.state,
+            mempool: snapshot.mempool.into_iter().collect(),
+            receipts: snapshot.receipts,
+            seen_tx_ids,
+            blocks: snapshot.blocks,
+        }
     }
 
     fn apply_tx(&mut self, tx: &Transaction) -> ApplyResult {
@@ -334,5 +399,26 @@ mod tests {
         matches!(receipt.status, ReceiptStatus::Rejected);
         assert_eq!(ledger.get_balance("alice"), 5);
         assert_eq!(ledger.get_balance("bob"), 0);
+    }
+
+    #[test]
+    fn snapshot_roundtrip_restores_state_and_mempool() {
+        let mut ledger = Ledger::new();
+        ledger.credit_account("alice", 100);
+        ledger.ensure_account("bob");
+        ledger
+            .submit_tx(SubmitTxRequest {
+                from: "alice".to_string(),
+                to: "bob".to_string(),
+                amount: 10,
+                nonce: 1,
+            })
+            .expect("submit");
+
+        let snapshot = ledger.snapshot();
+        let restored = Ledger::from_snapshot(snapshot);
+
+        assert_eq!(restored.get_balance("alice"), 100);
+        assert_eq!(restored.mempool_size(), 1);
     }
 }

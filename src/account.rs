@@ -92,6 +92,11 @@ impl Account {
         let path = PathBuf::from(dir).join(credentials);
         let mut file = File::create(path)?;
         file.write_all(&encrypted)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     }
 }
@@ -140,6 +145,7 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
     use secp256k1::PublicKey;
+    use tempfile::tempdir;
 
     #[test]
     fn account_address_matches_secret_key() {
@@ -178,6 +184,27 @@ mod tests {
     fn decrypt_rejects_short_input() {
         let err = decrypt(&[1, 2, 3], b"password").expect_err("short input should fail");
         assert!(err.to_string().contains("ciphertext too short"));
+    }
+
+    #[test]
+    fn persist_creates_private_key_file() {
+        let tmp = tempdir().expect("tempdir");
+        let dir = tmp.path().to_str().expect("utf8 dir");
+        let account = Account::new();
+        let addr = account.address().to_string();
+        account.persist(dir, "secret-pass").expect("persist");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = tmp.path().join(addr);
+            let mode = std::fs::metadata(path)
+                .expect("metadata")
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
     }
 
     proptest! {
