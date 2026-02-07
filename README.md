@@ -5,17 +5,26 @@ The Internet Computer have previously released several specifications for protoc
 there are called [ICC](https://internetcomputer.org/whitepapers/Internet%20Computer%20Consensus.pdf).
 
 ## Protocol 
-Implement improved version of ICC, called [BANYAN](https://arxiv.org/pdf/2312.05869)
+This project implements a practical Banyan/ICC-inspired protocol with a JSON-RPC node API, TCP gossip transport, and persistent local state.
 
-This is in worst case scenario as fast as ICC, but with a benevolent leader, it's faster since it only requires one roundtrip.
-Every blockchain protocol is based on a Node API (an api running on a machine, or several), which both broadcast and receive messages.
-In this project the messages are received through JSON-RPC. The node API needs to be able to handle user functions. For a normal wallet 
-this includes checking the balance etc.
-The node API must also handle incoming messages from other nodes. These include voting for proposal of notarization, vote of 
-notarization and finalization.
+Implemented behavior:
+- Consensus core:
+  - Proposal validation includes round checks, leader/rank constraints, parent proof linkage, quorum checks, and signature verification.
+  - Vote equivocation is rejected per voter/round.
+  - Timeout-driven round advancement is implemented (`on_tick`).
+- Networking:
+  - Nodes exchange consensus messages over TCP gossip using newline-delimited JSON wire messages.
+  - Message replay is guarded by wire IDs in the node runtime.
+- State execution:
+  - Transactions are accepted into a mempool and executed in produced blocks.
+  - Nonce/replay and balance checks are enforced; receipts are stored for committed/rejected txs.
+- Persistence and recovery:
+  - Snapshot + block history are persisted to disk (`state_snapshot.json`, `blocks.jsonl`).
+  - Node startup rehydrates in-memory ledger state from persisted snapshot.
+- Sync scaffolding:
+  - Snapshot/block export-import RPCs are available for manual catch-up between nodes.
 
-Node's speak to each other by a Gossip Protocol. This means that the nodes at random send their state to other random nodes, so that the
-state replication spreads like wildfire. This way it's very unlikely that nodes would miss data updates.
+Primary RPC surface includes account creation, faucet, tx submission, block production, balance/nonce/receipt queries, health/metrics probes, and snapshot sync endpoints.
 
 ## Message types
 1. Proposal - the leader node proposes another block for notarization, which means proposing for it to be included in the tree.
