@@ -7,6 +7,7 @@ mod account;
 mod block;
 mod consensus;
 mod constants;
+mod ledger;
 mod node;
 mod node_runtime;
 mod p2p;
