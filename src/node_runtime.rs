@@ -141,6 +141,7 @@ impl Engine {
 pub struct NodeRuntime {
     gossip: Arc<GossipNode>,
     inbound_task: JoinHandle<()>,
+    #[allow(dead_code)]
     store_path: PathBuf,
 }
 
@@ -191,6 +192,7 @@ impl NodeRuntime {
         })
     }
 
+    #[allow(dead_code)]
     pub fn store_path(&self) -> &PathBuf {
         &self.store_path
     }

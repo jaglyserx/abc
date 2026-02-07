@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    path::Path,
 };
 
 use anyhow::Context;
@@ -10,22 +10,20 @@ use crate::ledger::{ExecutedBlock, LedgerSnapshot};
 
 #[derive(Debug)]
 pub struct StateDb {
-    root: PathBuf,
-    snapshot_path: PathBuf,
-    blocks_path: PathBuf,
+    snapshot_path: std::path::PathBuf,
+    blocks_path: std::path::PathBuf,
 }
 
 impl StateDb {
     pub fn open(root: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let root = root.as_ref().to_path_buf();
-        fs::create_dir_all(&root)
+        let root = root.as_ref();
+        fs::create_dir_all(root)
             .with_context(|| format!("failed to create state db root {}", root.display()))?;
 
         let snapshot_path = root.join("state_snapshot.json");
         let blocks_path = root.join("blocks.jsonl");
 
         Ok(Self {
-            root,
             snapshot_path,
             blocks_path,
         })
@@ -81,6 +79,7 @@ impl StateDb {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn load_blocks(&self) -> anyhow::Result<Vec<ExecutedBlock>> {
         if !self.blocks_path.exists() {
             return Ok(Vec::new());
@@ -112,10 +111,6 @@ impl StateDb {
         }
         file.flush()?;
         Ok(())
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
     }
 }
 

@@ -8,6 +8,7 @@ use crate::block::{
     NotarizationCertificate, NotarizationVote, Signature, UnlockProof,
 };
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ConsensusMsg {
     Proposal(ProposalMsg),
@@ -87,6 +88,7 @@ impl ConsensusState {
         self.votes.clear_round(round);
     }
 
+    #[allow(dead_code)]
     pub fn on_tick(&mut self) -> Option<u64> {
         self.current_tick = self.current_tick.saturating_add(1);
         if self.current_tick.saturating_sub(self.round_started_at_tick) >= self.round_timeout_ticks
@@ -212,18 +214,19 @@ impl ConsensusState {
         }
 
         let key = (c.round, c.block_hash);
-        self.votes
-            .only_block_in_round(c.round, c.block_hash)
-            .then_some(self.emitted_finalization_votes.insert(key))
-            .unwrap_or(false)
-            .then_some(ConsensusMsg::FinalizationVote(FinalizationVote {
-                round: c.round,
-                block_hash: c.block_hash,
-                voter: self.id,
-                signature: self.sign_vote(SigKind::Finalization, c.round, c.block_hash),
-            }))
-            .into_iter()
-            .collect()
+        (if self.votes.only_block_in_round(c.round, c.block_hash) {
+            self.emitted_finalization_votes.insert(key)
+        } else {
+            false
+        })
+        .then_some(ConsensusMsg::FinalizationVote(FinalizationVote {
+            round: c.round,
+            block_hash: c.block_hash,
+            voter: self.id,
+            signature: self.sign_vote(SigKind::Finalization, c.round, c.block_hash),
+        }))
+        .into_iter()
+        .collect()
     }
 
     fn on_unlock_proof(&mut self, p: UnlockProof) -> Vec<ConsensusMsg> {
@@ -485,7 +488,6 @@ pub struct BlockTree {
 #[derive(Clone, Debug)]
 pub struct BlockNode {
     pub block: Block,
-    pub parent: Option<BlockHash>,
     pub children: Vec<BlockHash>,
     pub notarized: bool,
     pub unlocked: bool,
@@ -504,7 +506,6 @@ impl BlockTree {
         let hash = self.block_hash(&block);
         let node = BlockNode {
             block,
-            parent: None,
             children: Vec::new(),
             notarized: true,
             unlocked: true,
@@ -519,7 +520,6 @@ impl BlockTree {
         let hash = self.block_hash(&block);
         let node = BlockNode {
             block,
-            parent: Some(parent),
             children: Vec::new(),
             notarized: false,
             unlocked: false,
@@ -556,11 +556,11 @@ impl BlockTree {
     pub fn block_hash(&self, block: &Block) -> BlockHash {
         use sha3::{Digest, Sha3_256};
         let mut hasher = Sha3_256::new();
-        hasher.update(&block.header.round.to_le_bytes());
-        hasher.update(&block.header.proposer.to_le_bytes());
-        hasher.update(&block.header.parent_hash);
-        hasher.update(&block.header.payload_hash);
-        hasher.update(&block.header.rank.to_le_bytes());
+        hasher.update(block.header.round.to_le_bytes());
+        hasher.update(block.header.proposer.to_le_bytes());
+        hasher.update(block.header.parent_hash);
+        hasher.update(block.header.payload_hash);
+        hasher.update(block.header.rank.to_le_bytes());
         hasher.update(&block.payload.bytes);
         let out = hasher.finalize();
         out.into()
@@ -1041,7 +1041,7 @@ mod tests {
                             });
                         }
 
-                        let drop = ((tick + to + env.to) % 7) == 0;
+                        let drop = (tick + to + env.to).is_multiple_of(7);
                         if drop {
                             continue;
                         }

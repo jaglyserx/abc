@@ -18,6 +18,7 @@ pub struct WireMessage {
 }
 
 pub struct GossipNode {
+    #[allow(dead_code)]
     local_addr: SocketAddr,
     peers: Arc<Vec<SocketAddr>>,
     listener_task: JoinHandle<()>,
@@ -57,6 +58,7 @@ impl GossipNode {
         })
     }
 
+    #[allow(dead_code)]
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }

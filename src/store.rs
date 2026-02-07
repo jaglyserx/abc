@@ -1,7 +1,9 @@
+#[cfg(test)]
+use std::io::{BufRead, BufReader};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Write},
-    path::{Path, PathBuf},
+    io::Write,
+    path::Path,
     sync::Mutex,
 };
 
@@ -19,13 +21,12 @@ pub enum StoredEvent {
 
 #[derive(Debug)]
 pub struct ChainStore {
-    path: PathBuf,
     file: Mutex<File>,
 }
 
 impl ChainStore {
     pub fn open(path: impl AsRef<Path>) -> anyhow::Result<Self> {
-        let path = path.as_ref().to_path_buf();
+        let path = path.as_ref();
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create store dir {}", parent.display()))?;
@@ -34,11 +35,10 @@ impl ChainStore {
         let file = OpenOptions::new()
             .create(true)
             .append(true)
-            .open(&path)
+            .open(path)
             .with_context(|| format!("failed to open store {}", path.display()))?;
 
         Ok(Self {
-            path,
             file: Mutex::new(file),
         })
     }
@@ -69,10 +69,6 @@ impl ChainStore {
             out.push(serde_json::from_str::<StoredEvent>(&line)?);
         }
         Ok(out)
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 }
 

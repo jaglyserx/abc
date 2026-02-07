@@ -38,16 +38,6 @@ impl Address {
 
         Address(out[..32].try_into().unwrap())
     }
-
-    pub fn to_hex_string(&self) -> String {
-        use fmt::Write as _;
-
-        let mut out = String::with_capacity(self.0.len() * 2);
-        for byte in &self.0 {
-            write!(&mut out, "{:02x}", byte).expect("writing to string");
-        }
-        out
-    }
 }
 
 impl fmt::Display for Address {
@@ -107,7 +97,7 @@ fn encrypt(msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
 
     let mut key = [0u8; 32];
     Argon2::default().hash_password_into(pass, &salt, &mut key)?;
-    let key = key.try_into()?;
+    let key = key.into();
 
     let cipher = Aes256Gcm::new(&key);
     let nonce = Aes256Gcm::generate_nonce(&mut OsRngAES);
@@ -122,6 +112,7 @@ fn encrypt(msg: &[u8; 32], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
     Ok(combined)
 }
 
+#[allow(dead_code)]
 fn decrypt(data: &[u8], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
     if data.len() < constants::SALT_SIZE + constants::NONCE_SIZE {
         anyhow::bail!("ciphertext too short");
@@ -131,8 +122,8 @@ fn decrypt(data: &[u8], pass: &[u8]) -> anyhow::Result<Vec<u8>> {
     let (nonce, ciphertext) = rest.split_at(constants::NONCE_SIZE);
 
     let mut key = [0u8; 32];
-    Argon2::default().hash_password_into(pass, &salt, &mut key)?;
-    let key = key.try_into()?;
+    Argon2::default().hash_password_into(pass, salt, &mut key)?;
+    let key = key.into();
 
     let cipher = Aes256Gcm::new(&key);
     cipher
