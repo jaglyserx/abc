@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use secp256k1::{Message, PublicKey, Secp256k1, SecretKey, ecdsa::Signature as EcdsaSignature};
 use serde::{Deserialize, Serialize};
 
 use crate::block::{
@@ -37,6 +38,12 @@ pub struct ConsensusState {
     pub proposed: bool,
     pub tree: BlockTree,
     pub votes: VotePools,
+    validator_pubkeys: HashMap<NodeId, PublicKey>,
+    signer_secret: SecretKey,
+    current_tick: u64,
+    round_started_at_tick: u64,
+    round_timeout_ticks: u64,
+    voted_notarization_rounds: HashSet<u64>,
     emitted_notarizations: HashSet<(u64, BlockHash)>,
     emitted_unlocks: HashSet<(u64, BlockHash)>,
     emitted_finalizations: HashSet<(u64, BlockHash)>,
@@ -47,6 +54,7 @@ impl ConsensusState {
     pub fn new(id: NodeId, n: usize, f: usize, p: usize, genesis: Block) -> Self {
         let mut tree = BlockTree::new();
         tree.insert_genesis(genesis);
+        let (validator_pubkeys, signer_secret) = validator_keys(id, n);
         Self {
             id,
             n,
@@ -58,6 +66,12 @@ impl ConsensusState {
             proposed: false,
             tree,
             votes: VotePools::new(),
+            validator_pubkeys,
+            signer_secret,
+            current_tick: 0,
+            round_started_at_tick: 0,
+            round_timeout_ticks: 5,
+            voted_notarization_rounds: HashSet::new(),
             emitted_notarizations: HashSet::new(),
             emitted_unlocks: HashSet::new(),
             emitted_finalizations: HashSet::new(),
@@ -69,7 +83,18 @@ impl ConsensusState {
         self.round = round;
         self.fast_vote_sent = false;
         self.proposed = false;
+        self.round_started_at_tick = self.current_tick;
         self.votes.clear_round(round);
+    }
+
+    pub fn on_tick(&mut self) -> Option<u64> {
+        self.current_tick = self.current_tick.saturating_add(1);
+        if self.current_tick.saturating_sub(self.round_started_at_tick) >= self.round_timeout_ticks
+        {
+            self.start_round(self.round.saturating_add(1));
+            return Some(self.round);
+        }
+        None
     }
 
     pub fn handle_msg(&mut self, msg: ConsensusMsg) -> Vec<ConsensusMsg> {
@@ -88,22 +113,30 @@ impl ConsensusState {
         if !self.valid_proposal(&p) {
             return Vec::new();
         }
+        if self
+            .voted_notarization_rounds
+            .contains(&p.block.header.round)
+        {
+            return Vec::new();
+        }
         self.tree.insert_block(p.block.clone());
 
+        let block_hash = self.tree.block_hash(&p.block);
         let mut out = Vec::new();
         let vote = NotarizationVote {
             round: p.block.header.round,
-            block_hash: self.tree.block_hash(&p.block),
+            block_hash,
             voter: self.id,
-            signature: Signature::new(),
+            signature: self.sign_vote(SigKind::Notarization, p.block.header.round, block_hash),
         };
+        self.voted_notarization_rounds.insert(p.block.header.round);
         out.push(ConsensusMsg::NotarizationVote(vote));
         if !self.fast_vote_sent {
             let fv = FastVote {
                 round: p.block.header.round,
-                block_hash: self.tree.block_hash(&p.block),
+                block_hash,
                 voter: self.id,
-                signature: Signature::new(),
+                signature: self.sign_vote(SigKind::Fast, p.block.header.round, block_hash),
             };
             out.push(ConsensusMsg::FastVote(fv));
             self.fast_vote_sent = true;
@@ -113,6 +146,15 @@ impl ConsensusState {
 
     fn on_notarization_vote(&mut self, v: NotarizationVote) -> Vec<ConsensusMsg> {
         if !self.valid_vote_target(v.round, v.block_hash) || !self.valid_voter(v.voter) {
+            return Vec::new();
+        }
+        if !self.verify_vote_signature(
+            SigKind::Notarization,
+            v.round,
+            v.block_hash,
+            v.voter,
+            &v.signature,
+        ) {
             return Vec::new();
         }
 
@@ -135,6 +177,10 @@ impl ConsensusState {
 
     fn on_fast_vote(&mut self, v: FastVote) -> Vec<ConsensusMsg> {
         if !self.valid_vote_target(v.round, v.block_hash) || !self.valid_voter(v.voter) {
+            return Vec::new();
+        }
+        if !self.verify_vote_signature(SigKind::Fast, v.round, v.block_hash, v.voter, &v.signature)
+        {
             return Vec::new();
         }
 
@@ -174,7 +220,7 @@ impl ConsensusState {
                 round: c.round,
                 block_hash: c.block_hash,
                 voter: self.id,
-                signature: Signature::new(),
+                signature: self.sign_vote(SigKind::Finalization, c.round, c.block_hash),
             }))
             .into_iter()
             .collect()
@@ -191,6 +237,15 @@ impl ConsensusState {
 
     fn on_finalization_vote(&mut self, v: FinalizationVote) -> Vec<ConsensusMsg> {
         if !self.valid_vote_target(v.round, v.block_hash) || !self.valid_voter(v.voter) {
+            return Vec::new();
+        }
+        if !self.verify_vote_signature(
+            SigKind::Finalization,
+            v.round,
+            v.block_hash,
+            v.voter,
+            &v.signature,
+        ) {
             return Vec::new();
         }
 
@@ -221,8 +276,16 @@ impl ConsensusState {
 
     fn valid_proposal(&self, p: &ProposalMsg) -> bool {
         let block = &p.block;
+        let leader = self.leader_for_round(block.header.round);
 
         if block.header.round != self.round || block.header.round == 0 {
+            return false;
+        }
+        if block.header.rank == 0 {
+            if block.header.proposer != leader {
+                return false;
+            }
+        } else if block.header.proposer == leader || !self.round_timed_out() {
             return false;
         }
 
@@ -249,6 +312,18 @@ impl ConsensusState {
         true
     }
 
+    fn round_timed_out(&self) -> bool {
+        self.current_tick.saturating_sub(self.round_started_at_tick) >= self.round_timeout_ticks
+    }
+
+    fn leader_for_round(&self, round: u64) -> NodeId {
+        if self.n == 0 {
+            0
+        } else {
+            round % self.n as u64
+        }
+    }
+
     fn valid_voter(&self, voter: NodeId) -> bool {
         (voter as usize) < self.n
     }
@@ -262,31 +337,142 @@ impl ConsensusState {
 
     fn valid_notarization_certificate(&self, c: &NotarizationCertificate) -> bool {
         self.valid_vote_target(c.round, c.block_hash)
-            && self.valid_participants(&c.voters, &c.signatures)
+            && self.valid_participants(
+                SigKind::Notarization,
+                c.round,
+                c.block_hash,
+                &c.voters,
+                &c.signatures,
+            )
             && c.voters.len() >= quorum_notarization(self.n, self.f)
     }
 
     fn valid_unlock_proof(&self, p: &UnlockProof) -> bool {
         self.valid_vote_target(p.round, p.block_hash)
-            && self.valid_participants(&p.voters, &p.signatures)
+            && self.valid_participants(
+                SigKind::Fast,
+                p.round,
+                p.block_hash,
+                &p.voters,
+                &p.signatures,
+            )
             && p.voters.len() >= quorum_fast(self.n, self.p)
     }
 
     fn valid_finalization_certificate(&self, c: &FinalizationCertificate) -> bool {
         self.valid_vote_target(c.round, c.block_hash)
-            && self.valid_participants(&c.voters, &c.signatures)
+            && self.valid_participants(
+                SigKind::Finalization,
+                c.round,
+                c.block_hash,
+                &c.voters,
+                &c.signatures,
+            )
             && c.voters.len() >= quorum_finalization(self.n, self.f)
     }
 
-    fn valid_participants(&self, voters: &[NodeId], signatures: &[Signature]) -> bool {
+    fn valid_participants(
+        &self,
+        kind: SigKind,
+        round: u64,
+        block_hash: BlockHash,
+        voters: &[NodeId],
+        signatures: &[Signature],
+    ) -> bool {
         if voters.len() != signatures.len() {
             return false;
         }
 
         let mut unique = HashSet::new();
-        voters
-            .iter()
-            .all(|voter| self.valid_voter(*voter) && unique.insert(*voter))
+        voters.iter().zip(signatures).all(|(voter, signature)| {
+            self.valid_voter(*voter)
+                && unique.insert(*voter)
+                && self.verify_vote_signature(kind, round, block_hash, *voter, signature)
+        })
+    }
+
+    fn sign_vote(&self, kind: SigKind, round: u64, block_hash: BlockHash) -> Signature {
+        let secp = Secp256k1::new();
+        let digest = vote_digest(kind, round, block_hash);
+        let msg = Message::from_digest(digest);
+        let sig = secp.sign_ecdsa(msg, &self.signer_secret);
+        sig.serialize_compact().to_vec()
+    }
+
+    fn verify_vote_signature(
+        &self,
+        kind: SigKind,
+        round: u64,
+        block_hash: BlockHash,
+        voter: NodeId,
+        signature: &[u8],
+    ) -> bool {
+        let pubkey = match self.validator_pubkeys.get(&voter) {
+            Some(key) => key,
+            None => return false,
+        };
+        if signature.len() != 64 {
+            return false;
+        }
+
+        let sig = match EcdsaSignature::from_compact(signature) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
+        let digest = vote_digest(kind, round, block_hash);
+        let msg = Message::from_digest(digest);
+        Secp256k1::new().verify_ecdsa(msg, &sig, pubkey).is_ok()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum SigKind {
+    Notarization,
+    Finalization,
+    Fast,
+}
+
+fn vote_digest(kind: SigKind, round: u64, block_hash: BlockHash) -> [u8; 32] {
+    use sha3::{Digest, Sha3_256};
+    let mut hasher = Sha3_256::new();
+    let kind_byte = match kind {
+        SigKind::Notarization => 1u8,
+        SigKind::Finalization => 2u8,
+        SigKind::Fast => 3u8,
+    };
+    hasher.update([kind_byte]);
+    hasher.update(round.to_le_bytes());
+    hasher.update(block_hash);
+    hasher.finalize().into()
+}
+
+fn validator_keys(id: NodeId, n: usize) -> (HashMap<NodeId, PublicKey>, SecretKey) {
+    let mut map = HashMap::new();
+    let mut local = deterministic_secret(id);
+    let secp = Secp256k1::new();
+    for voter in 0..n as u64 {
+        let secret = deterministic_secret(voter);
+        if voter == id {
+            local = secret;
+        }
+        map.insert(voter, PublicKey::from_secret_key(&secp, &secret));
+    }
+    (map, local)
+}
+
+fn deterministic_secret(node_id: NodeId) -> SecretKey {
+    use sha3::{Digest, Sha3_256};
+
+    let mut ctr = 0u64;
+    loop {
+        let mut hasher = Sha3_256::new();
+        hasher.update(node_id.to_le_bytes());
+        hasher.update(ctr.to_le_bytes());
+        let digest: [u8; 32] = hasher.finalize().into();
+        if let Ok(secret) = SecretKey::from_byte_array(digest) {
+            return secret;
+        }
+        ctr = ctr.saturating_add(1);
     }
 }
 
@@ -499,16 +685,11 @@ impl VotePools {
     }
 
     pub fn build_notarization(&self, round: u64, hash: BlockHash) -> NotarizationCertificate {
-        let voters = self
+        let (voters, signatures) = self
             .notarization
             .get(&(round, hash))
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_else(Vec::new);
-        let signatures = self
-            .notarization
-            .get(&(round, hash))
-            .map(|m| m.values().cloned().collect())
-            .unwrap_or_else(Vec::new);
+            .map(ordered_signers)
+            .unwrap_or_default();
 
         NotarizationCertificate {
             round,
@@ -519,16 +700,11 @@ impl VotePools {
     }
 
     pub fn build_finalization(&self, round: u64, hash: BlockHash) -> FinalizationCertificate {
-        let voters = self
+        let (voters, signatures) = self
             .finalization
             .get(&(round, hash))
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_else(Vec::new);
-        let signatures = self
-            .finalization
-            .get(&(round, hash))
-            .map(|m| m.values().cloned().collect())
-            .unwrap_or_else(Vec::new);
+            .map(ordered_signers)
+            .unwrap_or_default();
 
         FinalizationCertificate {
             round,
@@ -539,16 +715,11 @@ impl VotePools {
     }
 
     pub fn build_unlock_proof(&self, round: u64, hash: BlockHash) -> UnlockProof {
-        let voters = self
+        let (voters, signatures) = self
             .fast
             .get(&(round, hash))
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_else(Vec::new);
-        let signatures = self
-            .fast
-            .get(&(round, hash))
-            .map(|m| m.values().cloned().collect())
-            .unwrap_or_else(Vec::new);
+            .map(ordered_signers)
+            .unwrap_or_default();
 
         UnlockProof {
             round,
@@ -578,10 +749,20 @@ pub fn quorum_fast(n: usize, p: usize) -> usize {
     n.saturating_sub(p)
 }
 
+fn ordered_signers(votes: &HashMap<NodeId, Signature>) -> (Vec<NodeId>, Vec<Signature>) {
+    let mut entries: Vec<(NodeId, Signature)> =
+        votes.iter().map(|(k, v)| (*k, v.clone())).collect();
+    entries.sort_by_key(|(voter, _)| *voter);
+    let voters = entries.iter().map(|(voter, _)| *voter).collect();
+    let signatures = entries.into_iter().map(|(_, sig)| sig).collect();
+    (voters, signatures)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::block::{BlockHeader, BlockPayload};
+    use std::collections::VecDeque;
 
     fn block(round: u64, proposer: NodeId, parent_hash: BlockHash, payload: &[u8]) -> Block {
         Block {
@@ -600,21 +781,36 @@ mod tests {
     }
 
     fn cert(round: u64, hash: BlockHash, voters: usize) -> NotarizationCertificate {
+        let voters_vec: Vec<NodeId> = (0..voters as u64).collect();
         NotarizationCertificate {
             round,
             block_hash: hash,
-            voters: (0..voters as u64).collect(),
-            signatures: vec![vec![]; voters],
+            signatures: voters_vec
+                .iter()
+                .map(|v| sign_for_node(*v, SigKind::Notarization, round, hash))
+                .collect(),
+            voters: voters_vec,
         }
     }
 
     fn unlock(round: u64, hash: BlockHash, voters: usize) -> UnlockProof {
+        let voters_vec: Vec<NodeId> = (0..voters as u64).collect();
         UnlockProof {
             round,
             block_hash: hash,
-            voters: (0..voters as u64).collect(),
-            signatures: vec![vec![]; voters],
+            signatures: voters_vec
+                .iter()
+                .map(|v| sign_for_node(*v, SigKind::Fast, round, hash))
+                .collect(),
+            voters: voters_vec,
         }
+    }
+
+    fn sign_for_node(voter: NodeId, kind: SigKind, round: u64, hash: BlockHash) -> Signature {
+        let secret = deterministic_secret(voter);
+        let msg = Message::from_digest(vote_digest(kind, round, hash));
+        let sig = Secp256k1::new().sign_ecdsa(msg, &secret);
+        sig.serialize_compact().to_vec()
     }
 
     #[test]
@@ -624,7 +820,7 @@ mod tests {
         state.start_round(1);
 
         let parent_hash = state.tree.block_hash(&genesis);
-        let proposal_block = block(1, 2, parent_hash, b"proposal");
+        let proposal_block = block(1, 1, parent_hash, b"proposal");
         let proposal = ProposalMsg {
             block: proposal_block,
             parent_notarization: cert(0, parent_hash, quorum_notarization(4, 1)),
@@ -667,7 +863,7 @@ mod tests {
                 round: 1,
                 block_hash: hash,
                 voter,
-                signature: vec![],
+                signature: sign_for_node(voter, SigKind::Notarization, 1, hash),
             }));
             if voter < 3 {
                 assert!(out.is_empty());
@@ -679,8 +875,8 @@ mod tests {
         let extra = state.handle_msg(ConsensusMsg::NotarizationVote(NotarizationVote {
             round: 1,
             block_hash: hash,
-            voter: 4,
-            signature: vec![],
+            voter: 3,
+            signature: sign_for_node(3, SigKind::Notarization, 1, hash),
         }));
         assert!(extra.is_empty());
     }
@@ -703,7 +899,7 @@ mod tests {
             round: 1,
             block_hash: ah,
             voter: 2,
-            signature: vec![],
+            signature: sign_for_node(2, SigKind::Notarization, 1, ah),
         }));
         assert!(first.is_empty());
 
@@ -711,7 +907,7 @@ mod tests {
             round: 1,
             block_hash: bh,
             voter: 2,
-            signature: vec![],
+            signature: sign_for_node(2, SigKind::Notarization, 1, bh),
         }));
         assert!(second.is_empty());
         assert_eq!(state.votes.count_notarization(1, bh), 0);
@@ -730,11 +926,152 @@ mod tests {
             round: 1,
             block_hash: hash,
             voters: vec![1, 1, 2],
-            signatures: vec![vec![], vec![], vec![]],
+            signatures: vec![
+                sign_for_node(1, SigKind::Notarization, 1, hash),
+                sign_for_node(1, SigKind::Notarization, 1, hash),
+                sign_for_node(2, SigKind::Notarization, 1, hash),
+            ],
         };
 
         let out = state.handle_msg(ConsensusMsg::Notarization(malformed));
         assert!(out.is_empty());
         assert!(!state.tree.nodes.get(&hash).is_some_and(|n| n.notarized));
+    }
+
+    #[test]
+    fn timeout_advances_round() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis);
+        state.start_round(1);
+        for _ in 0..4 {
+            assert_eq!(state.on_tick(), None);
+        }
+        assert_eq!(state.on_tick(), Some(2));
+        assert_eq!(state.round, 2);
+    }
+
+    #[test]
+    fn non_leader_rank_zero_proposal_is_rejected() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis.clone());
+        state.start_round(1);
+        let parent_hash = state.tree.block_hash(&genesis);
+
+        let proposal = ProposalMsg {
+            block: block(1, 2, parent_hash, b"bad-leader"),
+            parent_notarization: cert(0, parent_hash, quorum_notarization(4, 1)),
+            parent_unlock: unlock(0, parent_hash, quorum_fast(4, 1)),
+        };
+        let out = state.handle_msg(ConsensusMsg::Proposal(proposal));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn deterministic_simulation_handles_delay_drop_and_byzantine() {
+        #[derive(Clone)]
+        struct Envelope {
+            at: u64,
+            to: NodeId,
+            msg: ConsensusMsg,
+        }
+
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut nodes: HashMap<NodeId, ConsensusState> = (0..4u64)
+            .map(|id| {
+                let mut state = ConsensusState::new(id, 4, 1, 1, genesis.clone());
+                state.start_round(1);
+                (id, state)
+            })
+            .collect();
+
+        let parent_hash = nodes.get(&0).expect("node").tree.block_hash(&genesis);
+        let proposal_block = block(1, 1, parent_hash, b"sim");
+        let proposal_hash = nodes
+            .get(&0)
+            .expect("node")
+            .tree
+            .block_hash(&proposal_block);
+        let proposal = ConsensusMsg::Proposal(ProposalMsg {
+            block: proposal_block,
+            parent_notarization: cert(0, parent_hash, quorum_notarization(4, 1)),
+            parent_unlock: unlock(0, parent_hash, quorum_fast(4, 1)),
+        });
+
+        let mut queue = VecDeque::new();
+        for to in 0..4u64 {
+            queue.push_back(Envelope {
+                at: (to + 1) % 3,
+                to,
+                msg: proposal.clone(),
+            });
+        }
+
+        let mut tick = 0u64;
+        while tick < 40 {
+            let mut ready = Vec::new();
+            let mut rest = VecDeque::new();
+            while let Some(env) = queue.pop_front() {
+                if env.at <= tick {
+                    ready.push(env);
+                } else {
+                    rest.push_back(env);
+                }
+            }
+            queue = rest;
+
+            for env in ready {
+                let outputs = nodes
+                    .get_mut(&env.to)
+                    .expect("node exists")
+                    .handle_msg(env.msg.clone());
+
+                for out in outputs {
+                    for to in 0..4u64 {
+                        // deterministic byzantine/drop behavior: node 3 injects invalid votes, and some gossip is dropped.
+                        if env.to == 3 {
+                            queue.push_back(Envelope {
+                                at: tick + 1,
+                                to,
+                                msg: ConsensusMsg::NotarizationVote(NotarizationVote {
+                                    round: 1,
+                                    block_hash: proposal_hash,
+                                    voter: 3,
+                                    signature: vec![9; 64],
+                                }),
+                            });
+                        }
+
+                        let drop = ((tick + to + env.to) % 7) == 0;
+                        if drop {
+                            continue;
+                        }
+                        let delay = ((tick + to + env.to) % 3) + 1;
+                        queue.push_back(Envelope {
+                            at: tick + delay,
+                            to,
+                            msg: out.clone(),
+                        });
+                    }
+                }
+            }
+
+            for node in nodes.values_mut() {
+                let _ = node.on_tick();
+            }
+            tick += 1;
+        }
+
+        let finalized_counts: Vec<usize> = nodes
+            .values()
+            .map(|state| {
+                state
+                    .tree
+                    .nodes
+                    .values()
+                    .filter(|n| n.block.header.round == 1 && n.finalized)
+                    .count()
+            })
+            .collect();
+        assert!(finalized_counts.iter().any(|count| *count > 0));
     }
 }
