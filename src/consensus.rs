@@ -813,6 +813,15 @@ mod tests {
         sig.serialize_compact().to_vec()
     }
 
+    fn to_hex(bytes: &[u8]) -> String {
+        let mut out = String::with_capacity(bytes.len() * 2);
+        for b in bytes {
+            use std::fmt::Write as _;
+            let _ = write!(&mut out, "{:02x}", b);
+        }
+        out
+    }
+
     #[test]
     fn valid_proposal_emits_votes() {
         let genesis = block(0, 0, [0; 32], b"genesis");
@@ -936,6 +945,56 @@ mod tests {
         let out = state.handle_msg(ConsensusMsg::Notarization(malformed));
         assert!(out.is_empty());
         assert!(!state.tree.nodes.get(&hash).is_some_and(|n| n.notarized));
+    }
+
+    #[test]
+    fn rejects_malformed_unlock_proof() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis.clone());
+        state.start_round(1);
+        let b1 = block(1, 1, state.tree.block_hash(&genesis), b"b1");
+        let hash = state.tree.block_hash(&b1);
+        state.tree.insert_block(b1);
+
+        let malformed = UnlockProof {
+            round: 1,
+            block_hash: hash,
+            voters: vec![1, 1, 2],
+            signatures: vec![
+                sign_for_node(1, SigKind::Fast, 1, hash),
+                sign_for_node(1, SigKind::Fast, 1, hash),
+                sign_for_node(2, SigKind::Fast, 1, hash),
+            ],
+        };
+
+        let out = state.handle_msg(ConsensusMsg::UnlockProof(malformed));
+        assert!(out.is_empty());
+        assert!(!state.tree.nodes.get(&hash).is_some_and(|n| n.unlocked));
+    }
+
+    #[test]
+    fn rejects_malformed_finalization_certificate() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis.clone());
+        state.start_round(1);
+        let b1 = block(1, 1, state.tree.block_hash(&genesis), b"b1");
+        let hash = state.tree.block_hash(&b1);
+        state.tree.insert_block(b1);
+
+        let malformed = FinalizationCertificate {
+            round: 1,
+            block_hash: hash,
+            voters: vec![1, 1, 2],
+            signatures: vec![
+                sign_for_node(1, SigKind::Finalization, 1, hash),
+                sign_for_node(1, SigKind::Finalization, 1, hash),
+                sign_for_node(2, SigKind::Finalization, 1, hash),
+            ],
+        };
+
+        let out = state.handle_msg(ConsensusMsg::Finalization(malformed));
+        assert!(out.is_empty());
+        assert!(!state.tree.nodes.get(&hash).is_some_and(|n| n.finalized));
     }
 
     #[test]
@@ -1073,5 +1132,123 @@ mod tests {
             })
             .collect();
         assert!(finalized_counts.iter().any(|count| *count > 0));
+
+        let mut finalized_hashes_round1 = HashSet::new();
+        for state in nodes.values() {
+            for (hash, node) in &state.tree.nodes {
+                if node.block.header.round == 1 && node.finalized {
+                    finalized_hashes_round1.insert(*hash);
+                }
+            }
+        }
+        assert!(
+            finalized_hashes_round1.len() <= 1,
+            "conflicting round-1 finalized hashes observed"
+        );
+    }
+
+    #[test]
+    fn rejects_equivocating_fast_vote() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis.clone());
+        state.start_round(1);
+
+        let parent_hash = state.tree.block_hash(&genesis);
+        let a = block(1, 1, parent_hash, b"a");
+        let b = block(1, 2, parent_hash, b"b");
+        let ah = state.tree.block_hash(&a);
+        let bh = state.tree.block_hash(&b);
+        state.tree.insert_block(a);
+        state.tree.insert_block(b);
+
+        let first = state.handle_msg(ConsensusMsg::FastVote(FastVote {
+            round: 1,
+            block_hash: ah,
+            voter: 2,
+            signature: sign_for_node(2, SigKind::Fast, 1, ah),
+        }));
+        assert!(first.is_empty());
+
+        let second = state.handle_msg(ConsensusMsg::FastVote(FastVote {
+            round: 1,
+            block_hash: bh,
+            voter: 2,
+            signature: sign_for_node(2, SigKind::Fast, 1, bh),
+        }));
+        assert!(second.is_empty());
+        assert_eq!(state.votes.count_fast(1, bh), 0);
+    }
+
+    #[test]
+    fn rejects_equivocating_finalization_vote() {
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut state = ConsensusState::new(1, 4, 1, 1, genesis.clone());
+        state.start_round(1);
+
+        let parent_hash = state.tree.block_hash(&genesis);
+        let a = block(1, 1, parent_hash, b"a");
+        let b = block(1, 2, parent_hash, b"b");
+        let ah = state.tree.block_hash(&a);
+        let bh = state.tree.block_hash(&b);
+        state.tree.insert_block(a);
+        state.tree.insert_block(b);
+
+        let first = state.handle_msg(ConsensusMsg::FinalizationVote(FinalizationVote {
+            round: 1,
+            block_hash: ah,
+            voter: 2,
+            signature: sign_for_node(2, SigKind::Finalization, 1, ah),
+        }));
+        assert!(first.is_empty());
+
+        let second = state.handle_msg(ConsensusMsg::FinalizationVote(FinalizationVote {
+            round: 1,
+            block_hash: bh,
+            voter: 2,
+            signature: sign_for_node(2, SigKind::Finalization, 1, bh),
+        }));
+        assert!(second.is_empty());
+        assert_eq!(state.votes.count_finalization(1, bh), 0);
+    }
+
+    #[test]
+    fn conformance_val_003_vote_digest_golden_vector() {
+        let hash = [7u8; 32];
+        let digest = vote_digest(SigKind::Notarization, 1, hash);
+        assert_eq!(
+            to_hex(&digest),
+            "437944f2eef98aaf2dd4bd0eef7223b61b9f270bbc3f1221c64c3d1a39fa9235"
+        );
+    }
+
+    #[test]
+    fn conformance_val_003_vote_signature_golden_vector() {
+        let hash = [7u8; 32];
+        let sig = sign_for_node(2, SigKind::Notarization, 1, hash);
+        assert_eq!(
+            to_hex(&sig),
+            "1aedb70ed893f90256a61462cc8869b4b5e1ad04ffaa70e65b7839cd7e92e2eb00749cfb6ecd78c7f9f942c8342ced435fb464421ab9a3acbe7a2415dc2346fc"
+        );
+    }
+
+    #[test]
+    fn conformance_val_003_notarization_certificate_json_golden_vector() {
+        let hash = [7u8; 32];
+        let cert = NotarizationCertificate {
+            round: 1,
+            block_hash: hash,
+            voters: vec![0, 1, 2],
+            signatures: vec![
+                sign_for_node(0, SigKind::Notarization, 1, hash),
+                sign_for_node(1, SigKind::Notarization, 1, hash),
+                sign_for_node(2, SigKind::Notarization, 1, hash),
+            ],
+        };
+
+        let json = serde_json::to_string(&cert).expect("serialize cert");
+        assert_eq!(
+            json,
+            "{\"round\":1,\"block_hash\":[7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7,7],\"voters\":[0,1,2],\"signatures\":[[63,255,116,37,97,219,170,93,180,212,9,156,90,163,105,243,49,86,133,65,188,7,90,14,142,133,106,214,160,146,144,224,94,122,73,168,70,217,61,165,17,85,50,83,165,54,116,93,223,136,136,98,219,108,33,236,132,139,83,153,113,239,27,77],[156,229,66,99,189,236,248,121,0,219,136,165,166,14,161,47,5,69,15,180,44,169,63,68,74,205,225,227,175,30,76,72,54,140,16,196,68,30,151,198,186,102,223,220,214,148,126,93,212,147,101,132,182,185,228,109,96,180,208,55,242,250,84,183],[26,237,183,14,216,147,249,2,86,166,20,98,204,136,105,180,181,225,173,4,255,170,112,230,91,120,57,205,126,146,226,235,0,116,156,251,110,205,120,199,249,249,66,200,52,44,237,67,95,180,100,66,26,185,163,172,190,122,36,21,220,35,70,252]]}"
+        );
     }
 }

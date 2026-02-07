@@ -35,3 +35,17 @@ jobs:
         run: cargo test consensus::tests::deterministic_simulation_handles_delay_drop_and_byzantine
       - name: Property tests
         run: cargo test account::tests::roundtrip_works
+
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Conformance vectors (VAL-003)
+        run: cargo test conformance_val_003
+      - name: Conformance equivocation guards (VOTE-001/VOTE-002)
+        run: cargo test rejects_equivocating_
+      - name: Conformance certificate validation (VAL-002/FIN-001)
+        run: cargo test rejects_malformed_
+      - name: Conformance safety simulation (FIN-002/SIM-001)
+        run: cargo test deterministic_simulation_handles_delay_drop_and_byzantine
