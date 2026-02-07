@@ -51,3 +51,5 @@ jobs:
         run: cargo test rejects_malformed_
       - name: Conformance safety simulation (FIN-002/SIM-001)
         run: cargo test deterministic_simulation_handles_delay_drop_and_byzantine
+      - name: Conformance mixed-fault multi-round simulation (SIM-002)
+        run: cargo test conformance_sim_002_multi_round_mixed_faults_preserve_safety_and_progress

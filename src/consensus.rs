@@ -1289,4 +1289,151 @@ mod tests {
         let after_timeout = state.handle_msg(ConsensusMsg::Proposal(proposal));
         assert_eq!(after_timeout.len(), 2);
     }
+
+    #[test]
+    fn conformance_sim_002_multi_round_mixed_faults_preserve_safety_and_progress() {
+        #[derive(Clone)]
+        struct Envelope {
+            at: u64,
+            to: NodeId,
+            from: NodeId,
+            msg: ConsensusMsg,
+        }
+
+        let genesis = block(0, 0, [0; 32], b"genesis");
+        let mut nodes: HashMap<NodeId, ConsensusState> = (0..4u64)
+            .map(|id| {
+                let mut state = ConsensusState::new(id, 4, 1, 1, genesis.clone());
+                state.start_round(1);
+                (id, state)
+            })
+            .collect();
+
+        let mut queue = VecDeque::new();
+        let mut current_parent = nodes.get(&0).expect("node").tree.block_hash(&genesis);
+
+        // Seed three rounds with rank-0 leader proposals.
+        for round in 1..=3u64 {
+            let leader = round % 4;
+            let proposal_block = block(
+                round,
+                leader,
+                current_parent,
+                format!("r{round}").as_bytes(),
+            );
+            let proposal_hash = nodes
+                .get(&leader)
+                .expect("leader")
+                .tree
+                .block_hash(&proposal_block);
+            let proposal = ConsensusMsg::Proposal(ProposalMsg {
+                block: proposal_block,
+                parent_notarization: cert(round - 1, current_parent, quorum_notarization(4, 1)),
+                parent_unlock: unlock(round - 1, current_parent, quorum_fast(4, 1)),
+            });
+
+            for to in 0..4u64 {
+                queue.push_back(Envelope {
+                    at: (round - 1) * 2 + ((to + leader) % 3),
+                    to,
+                    from: leader,
+                    msg: proposal.clone(),
+                });
+            }
+            current_parent = proposal_hash;
+        }
+
+        let mut tick = 0u64;
+        while tick < 120 {
+            let mut ready = Vec::new();
+            let mut rest = VecDeque::new();
+            while let Some(env) = queue.pop_front() {
+                if env.at <= tick {
+                    ready.push(env);
+                } else {
+                    rest.push_back(env);
+                }
+            }
+            queue = rest;
+
+            for env in ready {
+                let outputs = nodes
+                    .get_mut(&env.to)
+                    .expect("node exists")
+                    .handle_msg(env.msg.clone());
+
+                for out in outputs {
+                    for to in 0..4u64 {
+                        // Deterministic mixed faults:
+                        // 1) periodic drops,
+                        // 2) variable delays,
+                        // 3) byzantine node (id=3) injecting invalid notarization votes.
+                        if (tick + to + env.to + env.from).is_multiple_of(11) {
+                            continue;
+                        }
+
+                        let delay = ((tick + to + env.to + env.from) % 4) + 1;
+                        queue.push_back(Envelope {
+                            at: tick + delay,
+                            to,
+                            from: env.to,
+                            msg: out.clone(),
+                        });
+
+                        if env.to == 3 {
+                            queue.push_back(Envelope {
+                                at: tick + 1,
+                                to,
+                                from: 3,
+                                msg: ConsensusMsg::NotarizationVote(NotarizationVote {
+                                    round: 2,
+                                    block_hash: [9; 32],
+                                    voter: 3,
+                                    signature: vec![7; 64],
+                                }),
+                            });
+                        }
+                    }
+                }
+            }
+
+            for node in nodes.values_mut() {
+                let _ = node.on_tick();
+            }
+            tick += 1;
+        }
+
+        // Safety: at most one finalized block hash per round across all nodes.
+        let mut finalized_by_round: HashMap<u64, HashSet<BlockHash>> = HashMap::new();
+        for state in nodes.values() {
+            for (hash, node) in &state.tree.nodes {
+                if node.finalized && node.block.header.round > 0 {
+                    finalized_by_round
+                        .entry(node.block.header.round)
+                        .or_default()
+                        .insert(*hash);
+                }
+            }
+        }
+        for (round, hashes) in &finalized_by_round {
+            assert!(
+                hashes.len() <= 1,
+                "conflicting finalized blocks in round {round}"
+            );
+        }
+
+        // Progress: nodes should advance rounds and accept at least one non-genesis proposal.
+        let max_round = nodes.values().map(|s| s.round).max().unwrap_or(0);
+        assert!(
+            max_round >= 3,
+            "expected round advancement under mixed faults"
+        );
+        let has_round_block = nodes
+            .values()
+            .any(|state| state.tree.nodes.values().any(|n| n.block.header.round > 0));
+        assert!(
+            has_round_block,
+            "expected at least one accepted non-genesis proposal"
+        );
+    }
 }

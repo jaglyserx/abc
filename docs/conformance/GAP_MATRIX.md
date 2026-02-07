@@ -36,10 +36,10 @@ Status legend:
 | Rule ID | Requirement | Status | Current Code | Test Evidence | Next Action |
 |---|---|---|---|---|---|
 | SIM-001 | Deterministic delayed/drop/byzantine simulation | implemented | `src/consensus.rs` tests | simulation test passes | Expand scenario matrix coverage |
-| SIM-002 | Property-level invariants for safety/liveness | partial | targeted unit tests | current tests are scenario-based | Add property tests for no-conflicting-finalization |
+| SIM-002 | Property-level invariants for safety/liveness | partial | deterministic single-round + multi-round mixed-fault scenarios | `deterministic_simulation_handles_delay_drop_and_byzantine`, `conformance_sim_002_multi_round_mixed_faults_preserve_safety_and_progress` | Add property/fuzz scheduler for broader invariant coverage |
 | OPS-001 | CI runs conformance tests explicitly | implemented | `.github/workflows/ci.yml` has dedicated `conformance` job | CI job covers vectors/equivocation/certificate/simulation | Keep rule-to-job mapping maintained |
 
 ## Immediate Work Queue
-1. Add broader multi-round and mixed-fault conformance scenarios.
+1. Add property/fuzz scheduler for safety/liveness invariant coverage.
 2. Add external protocol review checklist/signoff artifact template.
 3. Add conformance evidence artifact generation in CI.
