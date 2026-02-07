@@ -17,7 +17,7 @@ mod store;
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let (_rpc_addr, rpc_handle) = run_server().await?;
-    eprintln!("[info] rpc server started");
+    eprintln!("[info] rpc server started. address: {_rpc_addr}");
 
     let runtime_config = NodeRuntimeConfig::from_env()?;
     let runtime = NodeRuntime::start(runtime_config).await?;
